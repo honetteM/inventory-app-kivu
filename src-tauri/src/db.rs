@@ -1259,6 +1259,112 @@ pub fn correct_stock(
     })
 }
 
+pub fn receive_stock(
+    conn: &Connection,
+    business_id: &str,
+    product_id: &str,
+    quantity: i64,
+    receipt_reference: &str,
+    reason: Option<&str>,
+) -> Result<StockMovement, DbError> {
+    if quantity <= 0 {
+        return Err(DbError::InvalidInput(
+            "received quantity must be greater than zero".to_string(),
+        ));
+    }
+    let receipt_reference = receipt_reference.trim();
+    if receipt_reference.is_empty() || receipt_reference.chars().count() > 200 {
+        return Err(DbError::InvalidInput(
+            "delivery or invoice reference is required and must be 200 characters or fewer"
+                .to_string(),
+        ));
+    }
+    let reason = reason.map(str::trim).filter(|value| !value.is_empty());
+    if reason.is_some_and(|value| value.chars().count() > 500) {
+        return Err(DbError::InvalidInput(
+            "receiving notes must be 500 characters or fewer".to_string(),
+        ));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    let product: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT p.name, u.decimals_ok FROM products p
+             JOIN units u ON u.id = p.base_unit_id
+             WHERE p.id = ?1 AND p.business_id = ?2 AND p.is_active = 1",
+            params![product_id, business_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (product_name, base_unit_allows_decimals) = product.ok_or_else(|| {
+        DbError::InvalidInput("active product does not belong to this business".to_string())
+    })?;
+    if base_unit_allows_decimals == 0 && quantity % 1000 != 0 {
+        return Err(DbError::InvalidInput(
+            "received quantity must be a whole base unit".to_string(),
+        ));
+    }
+
+    let previous_quantity: i64 = tx
+        .query_row(
+            "SELECT quantity_on_hand FROM inventory_balances
+             WHERE product_id = ?1 AND business_id = ?2",
+            params![product_id, business_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    let new_quantity = previous_quantity.checked_add(quantity).ok_or_else(|| {
+        DbError::InvalidInput("received quantity exceeds the supported stock limit".to_string())
+    })?;
+
+    tx.execute(
+        "INSERT INTO inventory_balances (product_id, business_id, quantity_on_hand, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(product_id) DO UPDATE SET
+             quantity_on_hand = excluded.quantity_on_hand,
+             updated_at = excluded.updated_at",
+        params![product_id, business_id, new_quantity, timestamp],
+    )?;
+    tx.execute(
+        "INSERT INTO stock_movements
+            (id, business_id, product_id, movement_type, quantity_delta,
+             previous_quantity, new_quantity, reference_type, reference_id, reason, created_at)
+         VALUES (?1, ?2, ?3, 'purchase_received', ?4, ?5, ?6,
+                 'supplier_document', ?7, ?8, ?9)",
+        params![
+            id,
+            business_id,
+            product_id,
+            quantity,
+            previous_quantity,
+            new_quantity,
+            receipt_reference,
+            reason,
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+
+    Ok(StockMovement {
+        id,
+        business_id: business_id.to_string(),
+        product_id: product_id.to_string(),
+        product_name,
+        movement_type: "purchase_received".to_string(),
+        quantity_delta: quantity,
+        previous_quantity,
+        new_quantity,
+        reference_type: Some("supplier_document".to_string()),
+        reference_id: Some(receipt_reference.to_string()),
+        reason: reason.map(str::to_string),
+        user_id: None,
+        created_at: timestamp,
+    })
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct DbInfo {
     pub schema_version: i64,
@@ -2043,6 +2149,163 @@ mod tests {
                 .items[0]
                 .quantity_on_hand,
             0
+        );
+    }
+
+    #[test]
+    fn stock_receipt_increases_balance_and_records_supplier_document_reference() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "STOCK-RECEIPT-01");
+        let opening = set_opening_stock(&conn, &business.id, &product.id, 5_000, None).unwrap();
+        let receipt = receive_stock(
+            &conn,
+            &business.id,
+            &product.id,
+            3_000,
+            "  INV-2026-0042  ",
+            Some("  Partial delivery  "),
+        )
+        .unwrap();
+        let inventory =
+            list_inventory(&conn, &business.id, Some("STOCK-RECEIPT-01"), 0, 20).unwrap();
+        let movements =
+            list_stock_movements(&conn, &business.id, Some(&product.id), 0, 20).unwrap();
+
+        assert_eq!(receipt.movement_type, "purchase_received");
+        assert_eq!(receipt.quantity_delta, 3_000);
+        assert_eq!(receipt.previous_quantity, 5_000);
+        assert_eq!(receipt.new_quantity, 8_000);
+        assert_eq!(receipt.reference_type.as_deref(), Some("supplier_document"));
+        assert_eq!(receipt.reference_id.as_deref(), Some("INV-2026-0042"));
+        assert_eq!(receipt.reason.as_deref(), Some("Partial delivery"));
+        assert_eq!(inventory.items[0].quantity_on_hand, 8_000);
+        assert_eq!(movements.len(), 2);
+        assert!(movements.iter().any(|movement| movement.id == opening.id));
+        assert!(movements.iter().any(|movement| movement.id == receipt.id));
+    }
+
+    #[test]
+    fn stock_receipt_can_initialize_balance_and_obeys_decimal_unit_rules() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let bags = create_test_product(&conn, &business.id, "STOCK-RECEIPT-BAG");
+        let cable = create_product(
+            &conn,
+            &business.id,
+            None,
+            None,
+            "Cable",
+            "STOCK-RECEIPT-CABLE",
+            None,
+            None,
+            None,
+            None,
+            "sys-unit-m",
+            1_000,
+            1_500,
+            0,
+            "standard",
+        )
+        .unwrap();
+
+        let initial_receipt =
+            receive_stock(&conn, &business.id, &bags.id, 2_000, "DEL-01", None).unwrap();
+        assert_eq!(initial_receipt.previous_quantity, 0);
+        assert_eq!(initial_receipt.new_quantity, 2_000);
+        assert!(matches!(
+            set_opening_stock(&conn, &business.id, &bags.id, 1_000, None),
+            Err(DbError::InvalidInput(_))
+        ));
+        let decimal_receipt =
+            receive_stock(&conn, &business.id, &cable.id, 1_500, "DEL-02", None).unwrap();
+        assert_eq!(decimal_receipt.new_quantity, 1_500);
+        assert!(matches!(
+            receive_stock(&conn, &business.id, &bags.id, 1_500, "DEL-03", None),
+            Err(DbError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn stock_receipt_rejects_invalid_input_and_prevents_quantity_overflow() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "STOCK-RECEIPT-02");
+
+        assert!(matches!(
+            receive_stock(&conn, &business.id, &product.id, 0, "DEL-01", None),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            receive_stock(&conn, &business.id, &product.id, -1_000, "DEL-01", None),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            receive_stock(&conn, &business.id, &product.id, 1_000, "   ", None),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            receive_stock(
+                &conn,
+                &business.id,
+                &product.id,
+                1_000,
+                &"x".repeat(201),
+                None
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            receive_stock(
+                &conn,
+                &business.id,
+                &product.id,
+                1_000,
+                "DEL-01",
+                Some(&"x".repeat(501))
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            receive_stock(
+                &conn,
+                &other_business.id,
+                &product.id,
+                1_000,
+                "DEL-01",
+                None
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(
+            list_stock_movements(&conn, &business.id, Some(&product.id), 0, 20)
+                .unwrap()
+                .is_empty()
+        );
+
+        conn.execute(
+            "INSERT INTO inventory_balances (product_id, business_id, quantity_on_hand, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![product.id, business.id, i64::MAX, now_utc()],
+        )
+        .unwrap();
+        assert!(matches!(
+            receive_stock(&conn, &business.id, &product.id, 1_000, "DEL-02", None),
+            Err(DbError::InvalidInput(_))
+        ));
+        let balance: i64 = conn
+            .query_row(
+                "SELECT quantity_on_hand FROM inventory_balances WHERE product_id = ?1",
+                params![product.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(balance, i64::MAX);
+        assert!(
+            list_stock_movements(&conn, &business.id, Some(&product.id), 0, 20)
+                .unwrap()
+                .is_empty()
         );
     }
 

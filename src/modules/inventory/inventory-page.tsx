@@ -112,6 +112,9 @@ export function InventoryPage() {
   const [openingReason, setOpeningReason] = useState("");
   const [correctedQuantity, setCorrectedQuantity] = useState("");
   const [correctionReason, setCorrectionReason] = useState("");
+  const [receivedQuantity, setReceivedQuantity] = useState("");
+  const [receiptReference, setReceiptReference] = useState("");
+  const [receiptNotes, setReceiptNotes] = useState("");
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
   const [isLoadingInventory, setIsLoadingInventory] = useState(false);
   const [isLoadingMovements, setIsLoadingMovements] = useState(false);
@@ -199,6 +202,9 @@ export function InventoryPage() {
       setOpeningReason("");
       setCorrectedQuantity("");
       setCorrectionReason("");
+      setReceivedQuantity("");
+      setReceiptReference("");
+      setReceiptNotes("");
       return;
     }
 
@@ -313,6 +319,48 @@ export function InventoryPage() {
     }
   }
 
+  async function handleStockReceipt(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!businessId || !selectedProduct) {
+      setError("Select a product before receiving stock.");
+      return;
+    }
+
+    setError(null);
+    setIsSaving(true);
+    try {
+      await invoke<StockMovement>("inventory_receive_stock", {
+        businessId,
+        productId: selectedProduct.product_id,
+        quantity: toScaledQuantity(receivedQuantity, selectedProduct.base_unit_allows_decimals),
+        receiptReference: receiptReference.trim(),
+        reason: receiptNotes.trim() || null,
+      });
+      setReceivedQuantity("");
+      setReceiptReference("");
+      setReceiptNotes("");
+      const result = await invoke<InventoryPageData>("inventory_list", {
+        businessId,
+        search: search.trim() || null,
+        offset: page * PAGE_SIZE,
+        limit: PAGE_SIZE,
+      });
+      setInventory(result.items);
+      setTotalCount(result.total_count);
+      const history = await invoke<StockMovement[]>("stock_movement_list", {
+        businessId,
+        productId: selectedProduct.product_id,
+        offset: 0,
+        limit: MOVEMENT_PAGE_SIZE,
+      });
+      setMovements(history);
+    } catch (cause) {
+      setError(`Could not receive stock. ${errorText(cause)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-7xl space-y-6">
       <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
@@ -320,7 +368,7 @@ export function InventoryPage() {
           <p className="text-sm font-medium text-muted-foreground">Stock control</p>
           <h1 className="text-3xl font-semibold tracking-tight">Inventory</h1>
           <p className="mt-2 text-muted-foreground">
-            Record opening quantities, correct counted stock, and review traceable movements.
+            Record opening quantities, receive deliveries, correct counted stock, and review movements.
           </p>
         </div>
         {businesses.length > 0 ? (
@@ -481,6 +529,57 @@ export function InventoryPage() {
                                     Opening stock can only be recorded before the first stock movement.
                                   </p>
                                 )}
+
+                                <form
+                                  className="grid gap-3 rounded-lg border bg-background p-4 md:grid-cols-[1fr_1fr_1fr_auto]"
+                                  onSubmit={handleStockReceipt}
+                                >
+                                  <div className="space-y-2">
+                                    <Label htmlFor={`receipt-quantity-${item.product_id}`}>
+                                      Received quantity ({item.base_unit_name})
+                                    </Label>
+                                    <Input
+                                      id={`receipt-quantity-${item.product_id}`}
+                                      type="number"
+                                      min="0.001"
+                                      step={item.base_unit_allows_decimals ? "0.001" : "1"}
+                                      required
+                                      value={receivedQuantity}
+                                      onChange={(event) => setReceivedQuantity(event.target.value)}
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
+                                    <Label htmlFor={`receipt-reference-${item.product_id}`}>
+                                      Delivery / invoice reference
+                                    </Label>
+                                    <Input
+                                      id={`receipt-reference-${item.product_id}`}
+                                      maxLength={200}
+                                      required
+                                      value={receiptReference}
+                                      onChange={(event) => setReceiptReference(event.target.value)}
+                                      placeholder="Supplier invoice or delivery note"
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
+                                    <Label htmlFor={`receipt-notes-${item.product_id}`}>Notes (optional)</Label>
+                                    <Input
+                                      id={`receipt-notes-${item.product_id}`}
+                                      maxLength={500}
+                                      value={receiptNotes}
+                                      onChange={(event) => setReceiptNotes(event.target.value)}
+                                      placeholder="Any receiving details"
+                                    />
+                                  </div>
+                                  <Button
+                                    type="submit"
+                                    className="self-end"
+                                    disabled={isSaving || !receivedQuantity || !receiptReference.trim()}
+                                  >
+                                    {isSaving ? <LoaderCircle className="animate-spin" /> : <Warehouse />}
+                                    Receive stock
+                                  </Button>
+                                </form>
 
                                 <form
                                   className="grid gap-3 rounded-lg border bg-background p-4 md:grid-cols-[1fr_1fr_auto]"
