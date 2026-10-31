@@ -184,6 +184,102 @@ pub fn create_business(
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct Category {
+    pub id: String,
+    pub business_id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
+    pub is_active: bool,
+}
+
+pub fn list_categories(conn: &Connection, business_id: &str) -> Result<Vec<Category>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, business_id, parent_id, name, description, is_active
+         FROM categories WHERE business_id = ?1 ORDER BY sort_order, name",
+    )?;
+    let categories = stmt
+        .query_map(params![business_id], |row| {
+            Ok(Category {
+                id: row.get(0)?,
+                business_id: row.get(1)?,
+                parent_id: row.get(2)?,
+                name: row.get(3)?,
+                description: row.get(4)?,
+                is_active: row.get::<_, i64>(5)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(categories)
+}
+
+pub fn create_category(
+    conn: &Connection,
+    business_id: &str,
+    parent_id: Option<&str>,
+    name: &str,
+    description: Option<&str>,
+) -> Result<Category, DbError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(DbError::InvalidInput(
+            "category name must not be empty".to_string(),
+        ));
+    }
+
+    let business_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM businesses WHERE id = ?1)",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    if !business_exists {
+        return Err(DbError::InvalidInput("business does not exist".to_string()));
+    }
+
+    if let Some(parent_id) = parent_id {
+        let parent_belongs_to_business: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM categories WHERE id = ?1 AND business_id = ?2
+             )",
+            params![parent_id, business_id],
+            |row| row.get(0),
+        )?;
+        if !parent_belongs_to_business {
+            return Err(DbError::InvalidInput(
+                "parent category must belong to the same business".to_string(),
+            ));
+        }
+    }
+
+    let description = description.map(str::trim).filter(|value| !value.is_empty());
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+
+    conn.execute(
+        "INSERT INTO categories
+            (id, business_id, parent_id, name, description, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![id, business_id, parent_id, name, description, timestamp],
+    )?;
+
+    Ok(conn.query_row(
+        "SELECT id, business_id, parent_id, name, description, is_active
+         FROM categories WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(Category {
+                id: row.get(0)?,
+                business_id: row.get(1)?,
+                parent_id: row.get(2)?,
+                name: row.get(3)?,
+                description: row.get(4)?,
+                is_active: row.get::<_, i64>(5)? != 0,
+            })
+        },
+    )?)
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct DbInfo {
     pub schema_version: i64,
     pub applied_migrations: i64,
@@ -312,5 +408,45 @@ mod tests {
 
         assert!(matches!(result, Err(DbError::InvalidInput(_))));
         assert!(list_businesses(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn categories_are_scoped_to_business_and_parent_categories() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let parent = create_category(&conn, &business.id, None, "  Building  ", None).unwrap();
+        let child = create_category(
+            &conn,
+            &business.id,
+            Some(&parent.id),
+            "Cement",
+            Some("  Bagged cement  "),
+        )
+        .unwrap();
+        create_category(&conn, &other_business.id, None, "Building", None).unwrap();
+
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(child.description.as_deref(), Some("Bagged cement"));
+        assert_eq!(list_categories(&conn, &business.id).unwrap().len(), 2);
+        assert_eq!(list_categories(&conn, &other_business.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn category_creation_rejects_empty_names_and_cross_business_parents() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let parent = create_category(&conn, &other_business.id, None, "Building", None).unwrap();
+
+        assert!(matches!(
+            create_category(&conn, &business.id, None, "  ", None),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_category(&conn, &business.id, Some(&parent.id), "Cement", None),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(list_categories(&conn, &business.id).unwrap().is_empty());
     }
 }

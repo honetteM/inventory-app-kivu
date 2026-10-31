@@ -23,6 +23,37 @@ fn business_create(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn category_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::Category>, String> {
+    state
+        .with(|conn| db::list_categories(conn, &business_id))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn category_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    parent_id: Option<String>,
+    name: String,
+    description: Option<String>,
+) -> Result<db::Category, String> {
+    state
+        .with(|conn| {
+            db::create_category(
+                conn,
+                &business_id,
+                parent_id.as_deref(),
+                &name,
+                description.as_deref(),
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -36,7 +67,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             db_info,
             business_list,
-            business_create
+            business_create,
+            category_list,
+            category_create
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
