@@ -276,18 +276,32 @@ fn inventory_receive_stock(
     received_unit_cost: i64,
     receipt_reference: String,
     reason: Option<String>,
+    new_selling_price: Option<i64>,
 ) -> Result<db::StockMovement, String> {
     state
         .with(|conn| {
-            db::receive_stock(
-                conn,
-                &business_id,
-                &product_id,
-                quantity,
-                received_unit_cost,
-                &receipt_reference,
-                reason.as_deref(),
-            )
+            if let Some(new_selling_price) = new_selling_price {
+                db::receive_stock_with_selling_price(
+                    conn,
+                    &business_id,
+                    &product_id,
+                    quantity,
+                    received_unit_cost,
+                    &receipt_reference,
+                    reason.as_deref(),
+                    Some(new_selling_price),
+                )
+            } else {
+                db::receive_stock(
+                    conn,
+                    &business_id,
+                    &product_id,
+                    quantity,
+                    received_unit_cost,
+                    &receipt_reference,
+                    reason.as_deref(),
+                )
+            }
         })
         .map_err(|e| e.to_string())
 }

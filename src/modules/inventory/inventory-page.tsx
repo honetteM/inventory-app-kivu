@@ -36,6 +36,7 @@ interface InventoryItem {
   quantity_on_hand: number;
   average_unit_cost: number;
   stock_value: number;
+  selling_price: number;
   min_stock_quantity: number;
   base_unit_allows_decimals: boolean;
   has_movements: boolean;
@@ -104,6 +105,19 @@ function toScaledMoney(value: string): number {
   return Number(scaled);
 }
 
+function toScaledSellingPrice(value: string): number {
+  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(value);
+  if (!match) {
+    throw new Error("Selling price must be a non-negative RWF amount with up to 2 decimal places.");
+  }
+  const fraction = (match[2] ?? "").padEnd(2, "0");
+  const scaled = BigInt(match[1]) * MONEY_SCALE + BigInt(fraction || "0");
+  if (scaled > MAX_SAFE_INTEGER) {
+    throw new Error("Selling price is too large.");
+  }
+  return Number(scaled);
+}
+
 function formatMoney(scaledAmount: number): string {
   if (!Number.isSafeInteger(scaledAmount)) {
     return "Invalid amount";
@@ -142,6 +156,7 @@ export function InventoryPage() {
   const [correctionReason, setCorrectionReason] = useState("");
   const [receivedQuantity, setReceivedQuantity] = useState("");
   const [receivedUnitCost, setReceivedUnitCost] = useState("");
+  const [newSellingPrice, setNewSellingPrice] = useState("");
   const [receiptReference, setReceiptReference] = useState("");
   const [receiptNotes, setReceiptNotes] = useState("");
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
@@ -231,6 +246,7 @@ export function InventoryPage() {
     setCorrectionReason("");
     setReceivedQuantity("");
     setReceivedUnitCost("");
+    setNewSellingPrice("");
     setReceiptReference("");
     setReceiptNotes("");
     if (!businessId || !expandedProductId) {
@@ -366,9 +382,13 @@ export function InventoryPage() {
         receivedUnitCost: toScaledMoney(receivedUnitCost),
         receiptReference: receiptReference.trim(),
         reason: receiptNotes.trim() || null,
+        newSellingPrice: newSellingPrice.trim()
+          ? toScaledSellingPrice(newSellingPrice)
+          : null,
       });
       setReceivedQuantity("");
       setReceivedUnitCost("");
+      setNewSellingPrice("");
       setReceiptReference("");
       setReceiptNotes("");
       const result = await invoke<InventoryPageData>("inventory_list", {
@@ -573,9 +593,16 @@ export function InventoryPage() {
                                 ) : null}
 
                                 <form
-                                  className="grid gap-3 rounded-lg border bg-background p-4 md:grid-cols-[1fr_1fr_1.5fr_1fr_auto]"
+                                  className="grid gap-3 rounded-lg border bg-background p-4 md:grid-cols-2 xl:grid-cols-5"
                                   onSubmit={handleStockReceipt}
                                 >
+                                  <div className="col-span-full">
+                                    <h3 className="font-medium">Receive delivery</h3>
+                                    <p className="text-sm text-muted-foreground">
+                                      Current selling price: {formatMoney(item.selling_price)} per {item.base_unit_name}.
+                                      Enter a new price only if you want to update the price used in POS.
+                                    </p>
+                                  </div>
                                   <div className="space-y-2">
                                     <Label htmlFor={`receipt-quantity-${item.product_id}`}>
                                       Received quantity ({item.base_unit_name})
@@ -606,6 +633,20 @@ export function InventoryPage() {
                                     />
                                   </div>
                                   <div className="space-y-2">
+                                    <Label htmlFor={`receipt-selling-price-${item.product_id}`}>
+                                      New selling price per {item.base_unit_name} (optional, RWF)
+                                    </Label>
+                                    <Input
+                                      id={`receipt-selling-price-${item.product_id}`}
+                                      type="number"
+                                      min="0"
+                                      step="0.01"
+                                      value={newSellingPrice}
+                                      onChange={(event) => setNewSellingPrice(event.target.value)}
+                                      placeholder={formatMoney(item.selling_price)}
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
                                     <Label htmlFor={`receipt-reference-${item.product_id}`}>
                                       Delivery / invoice reference
                                     </Label>
@@ -630,7 +671,7 @@ export function InventoryPage() {
                                   </div>
                                   <Button
                                     type="submit"
-                                    className="self-end"
+                                    className="self-end xl:col-span-2"
                                     disabled={isSaving || !receivedQuantity || !receivedUnitCost || !receiptReference.trim()}
                                   >
                                     {isSaving ? <LoaderCircle className="animate-spin" /> : <Warehouse />}
