@@ -6,6 +6,7 @@ import { InventoryPage } from "@/modules/inventory/inventory-page";
 import { PosPage } from "@/modules/pos/pos-page";
 import { ProductsPage } from "@/modules/products/products-page";
 import { BusinessSetupPage } from "@/modules/settings/business-setup-page";
+import { SuppliersPage } from "@/modules/suppliers/suppliers-page";
 
 const placeholder = (title: string, description: string) => (
   <PagePlaceholder title={title} description={description} />
@@ -23,7 +24,7 @@ export const router = createBrowserRouter([
       { path: "purchases", element: placeholder("Purchases", "Supplier invoices and stock receiving.") },
       { path: "sales", element: placeholder("Sales History", "Completed transactions and returns.") },
       { path: "customers", element: placeholder("Customers", "Customer accounts, credit limits and debts.") },
-      { path: "suppliers", element: placeholder("Suppliers", "Supplier balances and payment history.") },
+      { path: "suppliers", element: <SuppliersPage /> },
       { path: "expenses", element: placeholder("Expenses", "Operational expense tracking.") },
       { path: "payments", element: placeholder("Payments", "Customer repayments and supplier payments.") },
       { path: "reports", element: placeholder("Reports", "Daily, weekly and monthly business reports.") },

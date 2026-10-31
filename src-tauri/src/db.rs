@@ -26,6 +26,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         include_str!("../migrations/005_receipt_cost_totals.sql"),
     ),
     (6, "006_sales", include_str!("../migrations/006_sales.sql")),
+    (
+        7,
+        "007_suppliers",
+        include_str!("../migrations/007_suppliers.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -450,6 +455,178 @@ pub fn create_brand(conn: &Connection, business_id: &str, name: &str) -> Result<
             })
         },
     )?)
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct Supplier {
+    pub id: String,
+    pub business_id: String,
+    pub name: String,
+    pub contact_person: Option<String>,
+    pub phone: Option<String>,
+    pub email: Option<String>,
+    pub address: Option<String>,
+    pub tax_id: Option<String>,
+    pub is_active: bool,
+}
+
+fn clean_supplier_field(
+    value: Option<&str>,
+    field: &str,
+    max_length: usize,
+) -> Result<Option<String>, DbError> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    if value.is_some_and(|value| value.chars().count() > max_length) {
+        return Err(DbError::InvalidInput(format!(
+            "{field} must be {max_length} characters or fewer"
+        )));
+    }
+    Ok(value.map(str::to_string))
+}
+
+fn supplier_name(name: &str) -> Result<String, DbError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(DbError::InvalidInput(
+            "supplier name must not be empty".to_string(),
+        ));
+    }
+    if name.chars().count() > 160 {
+        return Err(DbError::InvalidInput(
+            "supplier name must be 160 characters or fewer".to_string(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn map_supplier(row: &rusqlite::Row<'_>) -> rusqlite::Result<Supplier> {
+    Ok(Supplier {
+        id: row.get(0)?,
+        business_id: row.get(1)?,
+        name: row.get(2)?,
+        contact_person: row.get(3)?,
+        phone: row.get(4)?,
+        email: row.get(5)?,
+        address: row.get(6)?,
+        tax_id: row.get(7)?,
+        is_active: row.get::<_, i64>(8)? != 0,
+    })
+}
+
+pub fn list_suppliers(conn: &Connection, business_id: &str) -> Result<Vec<Supplier>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, business_id, name, contact_person, phone, email, address, tax_id, is_active
+         FROM suppliers WHERE business_id = ?1
+         ORDER BY is_active DESC, name COLLATE NOCASE, id",
+    )?;
+    let suppliers = stmt
+        .query_map(params![business_id], map_supplier)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(suppliers)
+}
+
+pub fn create_supplier(
+    conn: &Connection,
+    business_id: &str,
+    name: &str,
+    contact_person: Option<&str>,
+    phone: Option<&str>,
+    email: Option<&str>,
+    address: Option<&str>,
+    tax_id: Option<&str>,
+) -> Result<Supplier, DbError> {
+    let name = supplier_name(name)?;
+    let contact_person = clean_supplier_field(contact_person, "contact person", 160)?;
+    let phone = clean_supplier_field(phone, "phone", 80)?;
+    let email = clean_supplier_field(email, "email", 254)?;
+    let address = clean_supplier_field(address, "address", 500)?;
+    let tax_id = clean_supplier_field(tax_id, "tax ID", 100)?;
+    let business_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM businesses WHERE id = ?1)",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    if !business_exists {
+        return Err(DbError::InvalidInput("business does not exist".to_string()));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    conn.execute(
+        "INSERT INTO suppliers
+            (id, business_id, name, contact_person, phone, email, address, tax_id,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+        params![
+            id,
+            business_id,
+            name,
+            contact_person,
+            phone,
+            email,
+            address,
+            tax_id,
+            timestamp
+        ],
+    )?;
+    conn.query_row(
+        "SELECT id, business_id, name, contact_person, phone, email, address, tax_id, is_active
+         FROM suppliers WHERE id = ?1 AND business_id = ?2",
+        params![id, business_id],
+        map_supplier,
+    )
+    .map_err(DbError::Sqlite)
+}
+
+pub fn update_supplier(
+    conn: &Connection,
+    business_id: &str,
+    supplier_id: &str,
+    name: &str,
+    contact_person: Option<&str>,
+    phone: Option<&str>,
+    email: Option<&str>,
+    address: Option<&str>,
+    tax_id: Option<&str>,
+    is_active: bool,
+) -> Result<Supplier, DbError> {
+    let name = supplier_name(name)?;
+    let contact_person = clean_supplier_field(contact_person, "contact person", 160)?;
+    let phone = clean_supplier_field(phone, "phone", 80)?;
+    let email = clean_supplier_field(email, "email", 254)?;
+    let address = clean_supplier_field(address, "address", 500)?;
+    let tax_id = clean_supplier_field(tax_id, "tax ID", 100)?;
+    let timestamp = now_utc();
+    let updated = conn.execute(
+        "UPDATE suppliers
+         SET name = ?1, contact_person = ?2, phone = ?3, email = ?4,
+             address = ?5, tax_id = ?6, is_active = ?7, updated_at = ?8
+         WHERE id = ?9 AND business_id = ?10",
+        params![
+            name,
+            contact_person,
+            phone,
+            email,
+            address,
+            tax_id,
+            i64::from(is_active),
+            timestamp,
+            supplier_id,
+            business_id
+        ],
+    )?;
+    if updated != 1 {
+        return Err(DbError::InvalidInput(
+            "supplier does not belong to this business".to_string(),
+        ));
+    }
+    conn.query_row(
+        "SELECT id, business_id, name, contact_person, phone, email, address, tax_id, is_active
+         FROM suppliers WHERE id = ?1 AND business_id = ?2",
+        params![supplier_id, business_id],
+        map_supplier,
+    )
+    .map_err(DbError::Sqlite)
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2554,6 +2731,119 @@ mod tests {
         ));
         assert!(create_brand(&conn, &business.id, "BuildPro").is_err());
         assert_eq!(list_brands(&conn, &business.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn suppliers_are_business_scoped_and_contact_fields_are_normalized() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+
+        let supplier = create_supplier(
+            &conn,
+            &business.id,
+            "  Kigali Building Supplies  ",
+            Some("  Alice Uwase  "),
+            Some("  +250 788 000 000  "),
+            Some("  sales@example.rw  "),
+            Some("  Kigali  "),
+            Some("  TIN-123  "),
+        )
+        .unwrap();
+        create_supplier(
+            &conn,
+            &other_business.id,
+            "Kigali Building Supplies",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(supplier.name, "Kigali Building Supplies");
+        assert_eq!(supplier.contact_person.as_deref(), Some("Alice Uwase"));
+        assert_eq!(supplier.phone.as_deref(), Some("+250 788 000 000"));
+        assert_eq!(supplier.email.as_deref(), Some("sales@example.rw"));
+        assert_eq!(supplier.address.as_deref(), Some("Kigali"));
+        assert_eq!(supplier.tax_id.as_deref(), Some("TIN-123"));
+        assert_eq!(list_suppliers(&conn, &business.id).unwrap().len(), 1);
+        assert_eq!(list_suppliers(&conn, &other_business.id).unwrap().len(), 1);
+        assert!(matches!(
+            update_supplier(
+                &conn,
+                &other_business.id,
+                &supplier.id,
+                "Unauthorized edit",
+                None,
+                None,
+                None,
+                None,
+                None,
+                true
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+
+        let updated = update_supplier(
+            &conn,
+            &business.id,
+            &supplier.id,
+            "Kigali Building Supplies Ltd",
+            None,
+            Some("  "),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(updated.name, "Kigali Building Supplies Ltd");
+        assert_eq!(updated.phone, None);
+        assert!(!updated.is_active);
+        assert_eq!(
+            list_suppliers(&conn, &business.id).unwrap()[0].id,
+            supplier.id
+        );
+    }
+
+    #[test]
+    fn supplier_creation_rejects_invalid_name_business_and_field_lengths() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+
+        assert!(matches!(
+            create_supplier(&conn, &business.id, " ", None, None, None, None, None),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_supplier(
+                &conn,
+                "missing-business",
+                "Supplier",
+                None,
+                None,
+                None,
+                None,
+                None
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_supplier(
+                &conn,
+                &business.id,
+                "Supplier",
+                None,
+                Some(&"x".repeat(81)),
+                None,
+                None,
+                None
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(list_suppliers(&conn, &business.id).unwrap().is_empty());
     }
 
     #[test]

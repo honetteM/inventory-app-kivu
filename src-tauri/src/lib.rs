@@ -99,6 +99,74 @@ fn brand_create(
 }
 
 #[tauri::command]
+fn supplier_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::Supplier>, String> {
+    state
+        .with(|conn| db::list_suppliers(conn, &business_id))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn supplier_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    name: String,
+    contact_person: Option<String>,
+    phone: Option<String>,
+    email: Option<String>,
+    address: Option<String>,
+    tax_id: Option<String>,
+) -> Result<db::Supplier, String> {
+    state
+        .with(|conn| {
+            db::create_supplier(
+                conn,
+                &business_id,
+                &name,
+                contact_person.as_deref(),
+                phone.as_deref(),
+                email.as_deref(),
+                address.as_deref(),
+                tax_id.as_deref(),
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn supplier_update(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    supplier_id: String,
+    name: String,
+    contact_person: Option<String>,
+    phone: Option<String>,
+    email: Option<String>,
+    address: Option<String>,
+    tax_id: Option<String>,
+    is_active: bool,
+) -> Result<db::Supplier, String> {
+    state
+        .with(|conn| {
+            db::update_supplier(
+                conn,
+                &business_id,
+                &supplier_id,
+                &name,
+                contact_person.as_deref(),
+                phone.as_deref(),
+                email.as_deref(),
+                address.as_deref(),
+                tax_id.as_deref(),
+                is_active,
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn product_list(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -338,6 +406,9 @@ pub fn run() {
             unit_create,
             brand_list,
             brand_create,
+            supplier_list,
+            supplier_create,
+            supplier_update,
             product_list,
             pos_product_search,
             pos_checkout,
