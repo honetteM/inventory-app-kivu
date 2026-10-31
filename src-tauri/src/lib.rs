@@ -78,6 +78,27 @@ fn unit_create(
 }
 
 #[tauri::command]
+fn brand_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::Brand>, String> {
+    state
+        .with(|conn| db::list_brands(conn, &business_id))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn brand_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    name: String,
+) -> Result<db::Brand, String> {
+    state
+        .with(|conn| db::create_brand(conn, &business_id, &name))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn product_list(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -149,6 +170,8 @@ pub fn run() {
             category_create,
             unit_list,
             unit_create,
+            brand_list,
+            brand_create,
             product_list,
             product_create
         ])

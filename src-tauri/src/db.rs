@@ -372,6 +372,71 @@ pub fn create_unit(
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct Brand {
+    pub id: String,
+    pub business_id: String,
+    pub name: String,
+    pub is_active: bool,
+}
+
+pub fn list_brands(conn: &Connection, business_id: &str) -> Result<Vec<Brand>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, business_id, name, is_active
+         FROM brands WHERE business_id = ?1 ORDER BY name COLLATE NOCASE",
+    )?;
+    let brands = stmt
+        .query_map(params![business_id], |row| {
+            Ok(Brand {
+                id: row.get(0)?,
+                business_id: row.get(1)?,
+                name: row.get(2)?,
+                is_active: row.get::<_, i64>(3)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(brands)
+}
+
+pub fn create_brand(conn: &Connection, business_id: &str, name: &str) -> Result<Brand, DbError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(DbError::InvalidInput(
+            "brand name must not be empty".to_string(),
+        ));
+    }
+
+    let business_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM businesses WHERE id = ?1)",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    if !business_exists {
+        return Err(DbError::InvalidInput("business does not exist".to_string()));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    conn.execute(
+        "INSERT INTO brands (id, business_id, name, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![id, business_id, name, timestamp],
+    )?;
+
+    Ok(conn.query_row(
+        "SELECT id, business_id, name, is_active FROM brands WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(Brand {
+                id: row.get(0)?,
+                business_id: row.get(1)?,
+                name: row.get(2)?,
+                is_active: row.get::<_, i64>(3)? != 0,
+            })
+        },
+    )?)
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct Product {
     pub id: String,
     pub business_id: String,
@@ -1064,5 +1129,34 @@ mod tests {
             list_products(&conn, "biz", None, 0, 101),
             Err(DbError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn brands_are_scoped_to_business_and_names_are_trimmed() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+
+        let brand = create_brand(&conn, &business.id, "  BuildPro  ").unwrap();
+        create_brand(&conn, &other_business.id, "BuildPro").unwrap();
+
+        assert_eq!(brand.name, "BuildPro");
+        assert_eq!(brand.business_id, business.id);
+        assert_eq!(list_brands(&conn, &business.id).unwrap().len(), 1);
+        assert_eq!(list_brands(&conn, &other_business.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn brand_creation_rejects_empty_names_and_duplicates() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        create_brand(&conn, &business.id, "BuildPro").unwrap();
+
+        assert!(matches!(
+            create_brand(&conn, &business.id, " "),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(create_brand(&conn, &business.id, "BuildPro").is_err());
+        assert_eq!(list_brands(&conn, &business.id).unwrap().len(), 1);
     }
 }
