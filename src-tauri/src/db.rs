@@ -1155,6 +1155,110 @@ pub fn set_opening_stock(
     })
 }
 
+pub fn correct_stock(
+    conn: &Connection,
+    business_id: &str,
+    product_id: &str,
+    target_quantity: i64,
+    reason: &str,
+) -> Result<StockMovement, DbError> {
+    if target_quantity < 0 {
+        return Err(DbError::InvalidInput(
+            "corrected quantity must not be negative".to_string(),
+        ));
+    }
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(DbError::InvalidInput(
+            "a reason is required for stock correction".to_string(),
+        ));
+    }
+    if reason.chars().count() > 500 {
+        return Err(DbError::InvalidInput(
+            "stock correction reason must be 500 characters or fewer".to_string(),
+        ));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    let product: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT p.name, u.decimals_ok FROM products p
+             JOIN units u ON u.id = p.base_unit_id
+             WHERE p.id = ?1 AND p.business_id = ?2 AND p.is_active = 1",
+            params![product_id, business_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (product_name, base_unit_allows_decimals) = product.ok_or_else(|| {
+        DbError::InvalidInput("active product does not belong to this business".to_string())
+    })?;
+    if base_unit_allows_decimals == 0 && target_quantity % 1000 != 0 {
+        return Err(DbError::InvalidInput(
+            "corrected quantity must be a whole base unit".to_string(),
+        ));
+    }
+
+    let previous_quantity: i64 = tx
+        .query_row(
+            "SELECT quantity_on_hand FROM inventory_balances
+             WHERE product_id = ?1 AND business_id = ?2",
+            params![product_id, business_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    if target_quantity == previous_quantity {
+        return Err(DbError::InvalidInput(
+            "corrected quantity must differ from the current stock".to_string(),
+        ));
+    }
+    let quantity_delta = target_quantity - previous_quantity;
+
+    tx.execute(
+        "INSERT INTO inventory_balances (product_id, business_id, quantity_on_hand, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(product_id) DO UPDATE SET
+             quantity_on_hand = excluded.quantity_on_hand,
+             updated_at = excluded.updated_at",
+        params![product_id, business_id, target_quantity, timestamp],
+    )?;
+    tx.execute(
+        "INSERT INTO stock_movements
+            (id, business_id, product_id, movement_type, quantity_delta,
+             previous_quantity, new_quantity, reference_type, reference_id, reason, created_at)
+         VALUES (?1, ?2, ?3, 'stock_correction', ?4, ?5, ?6, 'product', ?3, ?7, ?8)",
+        params![
+            id,
+            business_id,
+            product_id,
+            quantity_delta,
+            previous_quantity,
+            target_quantity,
+            reason,
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+
+    Ok(StockMovement {
+        id,
+        business_id: business_id.to_string(),
+        product_id: product_id.to_string(),
+        product_name,
+        movement_type: "stock_correction".to_string(),
+        quantity_delta,
+        previous_quantity,
+        new_quantity: target_quantity,
+        reference_type: Some("product".to_string()),
+        reference_id: Some(product_id.to_string()),
+        reason: Some(reason.to_string()),
+        user_id: None,
+        created_at: timestamp,
+    })
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct DbInfo {
     pub schema_version: i64,
@@ -1866,6 +1970,80 @@ mod tests {
         ));
         let accepted = set_opening_stock(&conn, &business.id, &cable.id, 1_500, None).unwrap();
         assert_eq!(accepted.new_quantity, 1_500);
+    }
+
+    #[test]
+    fn stock_correction_updates_balance_and_records_signed_traceable_movements() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "STOCK-CORRECTION-01");
+
+        let initial = correct_stock(
+            &conn,
+            &business.id,
+            &product.id,
+            8_000,
+            "  First physical count  ",
+        )
+        .unwrap();
+        let correction =
+            correct_stock(&conn, &business.id, &product.id, 6_000, "Counted again").unwrap();
+        let inventory =
+            list_inventory(&conn, &business.id, Some("STOCK-CORRECTION-01"), 0, 20).unwrap();
+        let movements =
+            list_stock_movements(&conn, &business.id, Some(&product.id), 0, 20).unwrap();
+
+        assert_eq!(initial.movement_type, "stock_correction");
+        assert_eq!(initial.quantity_delta, 8_000);
+        assert_eq!(initial.previous_quantity, 0);
+        assert_eq!(initial.new_quantity, 8_000);
+        assert_eq!(initial.reason.as_deref(), Some("First physical count"));
+        assert_eq!(correction.quantity_delta, -2_000);
+        assert_eq!(correction.previous_quantity, 8_000);
+        assert_eq!(correction.new_quantity, 6_000);
+        assert_eq!(inventory.items[0].quantity_on_hand, 6_000);
+        assert_eq!(movements.len(), 2);
+        assert!(
+            movements
+                .iter()
+                .any(|movement| movement.id == correction.id)
+        );
+        assert!(movements.iter().any(|movement| movement.id == initial.id));
+    }
+
+    #[test]
+    fn stock_correction_rejects_invalid_quantities_reasons_and_businesses() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "STOCK-CORRECTION-02");
+
+        for (requested_business, target, reason) in [
+            (business.id.as_str(), -1, "Negative count"),
+            (business.id.as_str(), 500, "Fractional bag"),
+            (business.id.as_str(), 0, "No change"),
+            (business.id.as_str(), 1_000, "   "),
+            (business.id.as_str(), 1_000, &"x".repeat(501)),
+            (other_business.id.as_str(), 1_000, "Wrong business"),
+        ] {
+            assert!(matches!(
+                correct_stock(&conn, requested_business, &product.id, target, reason),
+                Err(DbError::InvalidInput(_))
+            ));
+        }
+
+        assert!(
+            list_stock_movements(&conn, &business.id, Some(&product.id), 0, 20)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            list_inventory(&conn, &business.id, Some("STOCK-CORRECTION-02"), 0, 20)
+                .unwrap()
+                .items[0]
+                .quantity_on_hand,
+            0
+        );
     }
 
     #[test]

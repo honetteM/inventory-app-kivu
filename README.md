@@ -9,7 +9,7 @@ Windows desktop application for managing a hardware shop, built with Tauri, Reac
 - `npm run build` checks TypeScript and creates the frontend production build.
 - `cargo test --manifest-path src-tauri/Cargo.toml` runs the Rust/database tests.
 
-Business setup, units, categories, and brands are available from **Settings** in the desktop application. Product creation and the searchable, paginated catalogue are available under **Products**, where category and brand are optional. Products can also have additional selling units with conversion factors to their base unit. The **Inventory** screen supports one-time opening stock and displays quantity snapshots from the stock movement ledger; movement user attribution remains empty until login is implemented. Business records are stored in the local database; the frontend-only Vite preview cannot access these Tauri commands. Prices are entered in whole RWF and stored using the database's hundredths-of-RWF scale.
+Business setup, units, categories, and brands are available from **Settings** in the desktop application. Product creation and the searchable, paginated catalogue are available under **Products**, where category and brand are optional. Products can also have additional selling units with conversion factors to their base unit. The **Inventory** screen supports one-time opening stock, reason-required counted-stock corrections, and displays quantity snapshots from the stock movement ledger; movement user attribution remains empty until login is implemented. Business records are stored in the local database; the frontend-only Vite preview cannot access these Tauri commands. Prices are entered in whole RWF and stored using the database's hundredths-of-RWF scale.
 
 ## Recommended IDE Setup
 

@@ -229,6 +229,19 @@ fn inventory_set_opening_stock(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn inventory_correct_stock(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    product_id: String,
+    target_quantity: i64,
+    reason: String,
+) -> Result<db::StockMovement, String> {
+    state
+        .with(|conn| db::correct_stock(conn, &business_id, &product_id, target_quantity, &reason))
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -255,7 +268,8 @@ pub fn run() {
             product_unit_create,
             inventory_list,
             stock_movement_list,
-            inventory_set_opening_stock
+            inventory_set_opening_stock,
+            inventory_correct_stock
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

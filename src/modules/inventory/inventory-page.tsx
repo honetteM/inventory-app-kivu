@@ -110,6 +110,8 @@ export function InventoryPage() {
   const [movements, setMovements] = useState<StockMovement[]>([]);
   const [openingQuantity, setOpeningQuantity] = useState("");
   const [openingReason, setOpeningReason] = useState("");
+  const [correctedQuantity, setCorrectedQuantity] = useState("");
+  const [correctionReason, setCorrectionReason] = useState("");
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
   const [isLoadingInventory, setIsLoadingInventory] = useState(false);
   const [isLoadingMovements, setIsLoadingMovements] = useState(false);
@@ -195,6 +197,8 @@ export function InventoryPage() {
       setMovements([]);
       setOpeningQuantity("");
       setOpeningReason("");
+      setCorrectedQuantity("");
+      setCorrectionReason("");
       return;
     }
 
@@ -266,6 +270,49 @@ export function InventoryPage() {
     }
   }
 
+  async function handleStockCorrection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!businessId || !selectedProduct) {
+      setError("Select a product before correcting its stock.");
+      return;
+    }
+
+    setError(null);
+    setIsSaving(true);
+    try {
+      await invoke<StockMovement>("inventory_correct_stock", {
+        businessId,
+        productId: selectedProduct.product_id,
+        targetQuantity: toScaledQuantity(
+          correctedQuantity,
+          selectedProduct.base_unit_allows_decimals,
+        ),
+        reason: correctionReason.trim(),
+      });
+      setCorrectedQuantity("");
+      setCorrectionReason("");
+      const result = await invoke<InventoryPageData>("inventory_list", {
+        businessId,
+        search: search.trim() || null,
+        offset: page * PAGE_SIZE,
+        limit: PAGE_SIZE,
+      });
+      setInventory(result.items);
+      setTotalCount(result.total_count);
+      const history = await invoke<StockMovement[]>("stock_movement_list", {
+        businessId,
+        productId: selectedProduct.product_id,
+        offset: 0,
+        limit: MOVEMENT_PAGE_SIZE,
+      });
+      setMovements(history);
+    } catch (cause) {
+      setError(`Could not correct stock. ${errorText(cause)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-7xl space-y-6">
       <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
@@ -273,7 +320,7 @@ export function InventoryPage() {
           <p className="text-sm font-medium text-muted-foreground">Stock control</p>
           <h1 className="text-3xl font-semibold tracking-tight">Inventory</h1>
           <p className="mt-2 text-muted-foreground">
-            Record opening quantities and review traceable stock movements.
+            Record opening quantities, correct counted stock, and review traceable movements.
           </p>
         </div>
         {businesses.length > 0 ? (
@@ -431,9 +478,48 @@ export function InventoryPage() {
                                   </form>
                                 ) : (
                                   <p className="text-sm text-muted-foreground">
-                                    Opening stock was already recorded. Future quantity changes must use a stock movement.
+                                    Opening stock can only be recorded before the first stock movement.
                                   </p>
                                 )}
+
+                                <form
+                                  className="grid gap-3 rounded-lg border bg-background p-4 md:grid-cols-[1fr_1fr_auto]"
+                                  onSubmit={handleStockCorrection}
+                                >
+                                  <div className="space-y-2">
+                                    <Label htmlFor={`correction-quantity-${item.product_id}`}>
+                                      Counted quantity ({item.base_unit_name})
+                                    </Label>
+                                    <Input
+                                      id={`correction-quantity-${item.product_id}`}
+                                      type="number"
+                                      min="0"
+                                      step={item.base_unit_allows_decimals ? "0.001" : "1"}
+                                      required
+                                      value={correctedQuantity}
+                                      onChange={(event) => setCorrectedQuantity(event.target.value)}
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
+                                    <Label htmlFor={`correction-reason-${item.product_id}`}>Reason (required)</Label>
+                                    <Input
+                                      id={`correction-reason-${item.product_id}`}
+                                      maxLength={500}
+                                      required
+                                      value={correctionReason}
+                                      onChange={(event) => setCorrectionReason(event.target.value)}
+                                      placeholder="Physical count discrepancy"
+                                    />
+                                  </div>
+                                  <Button
+                                    type="submit"
+                                    className="self-end"
+                                    disabled={isSaving || !correctedQuantity || !correctionReason.trim()}
+                                  >
+                                    {isSaving ? <LoaderCircle className="animate-spin" /> : <Warehouse />}
+                                    Correct stock
+                                  </Button>
+                                </form>
 
                                 <div className="space-y-3">
                                   <h3 className="font-medium">Movement history</h3>
