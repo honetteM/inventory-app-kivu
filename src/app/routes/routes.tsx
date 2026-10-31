@@ -3,6 +3,7 @@ import { AppLayout } from "../layouts/app-layout";
 import { PagePlaceholder } from "@/components/shared/page-placeholder";
 import { DashboardPage } from "@/modules/dashboard/dashboard-page";
 import { InventoryPage } from "@/modules/inventory/inventory-page";
+import { PosPage } from "@/modules/pos/pos-page";
 import { ProductsPage } from "@/modules/products/products-page";
 import { BusinessSetupPage } from "@/modules/settings/business-setup-page";
 
@@ -16,7 +17,7 @@ export const router = createBrowserRouter([
     element: <AppLayout />,
     children: [
       { index: true, element: <DashboardPage /> },
-      { path: "pos", element: placeholder("Point of Sale", "Fast checkout for walk-in customers.") },
+      { path: "pos", element: <PosPage /> },
       { path: "products", element: <ProductsPage /> },
       { path: "inventory", element: <InventoryPage /> },
       { path: "purchases", element: placeholder("Purchases", "Supplier invoices and stock receiving.") },

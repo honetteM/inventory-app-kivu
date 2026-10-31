@@ -112,6 +112,19 @@ fn product_list(
 }
 
 #[tauri::command]
+fn pos_product_search(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    search: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<db::PosProductPage, String> {
+    state
+        .with(|conn| db::search_pos_products(conn, &business_id, search.as_deref(), offset, limit))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn product_create(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -288,6 +301,7 @@ pub fn run() {
             brand_list,
             brand_create,
             product_list,
+            pos_product_search,
             product_create,
             product_unit_list,
             product_unit_create,

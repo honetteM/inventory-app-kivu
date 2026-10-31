@@ -476,6 +476,88 @@ pub struct ProductPage {
     pub total_count: i64,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct PosProduct {
+    pub id: String,
+    pub name: String,
+    pub sku: String,
+    pub barcode: Option<String>,
+    pub base_unit_name: String,
+    pub selling_price: i64,
+    pub quantity_on_hand: i64,
+    pub base_unit_allows_decimals: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PosProductPage {
+    pub items: Vec<PosProduct>,
+    pub total_count: i64,
+}
+
+pub fn search_pos_products(
+    conn: &Connection,
+    business_id: &str,
+    search: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> Result<PosProductPage, DbError> {
+    if offset < 0 || !(1..=100).contains(&limit) {
+        return Err(DbError::InvalidInput(
+            "POS search requires a non-negative offset and a limit between 1 and 100".to_string(),
+        ));
+    }
+
+    let search = search.map(str::trim).filter(|value| !value.is_empty());
+    let pattern = search.map(|value| {
+        format!(
+            "%{}%",
+            value
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        )
+    });
+    let total_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM products p
+         WHERE p.business_id = ?1 AND p.is_active = 1
+           AND (?2 IS NULL OR p.name LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+                OR p.sku LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+                OR COALESCE(p.barcode, '') LIKE ?2 ESCAPE '\\' COLLATE NOCASE)",
+        params![business_id, pattern],
+        |row| row.get(0),
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.name, p.sku, p.barcode, u.name, p.selling_price,
+                COALESCE(ib.quantity_on_hand, 0), u.decimals_ok
+         FROM products p
+         JOIN units u ON u.id = p.base_unit_id
+         LEFT JOIN inventory_balances ib
+           ON ib.product_id = p.id AND ib.business_id = p.business_id
+         WHERE p.business_id = ?1 AND p.is_active = 1
+           AND (?2 IS NULL OR p.name LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+                OR p.sku LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+                OR COALESCE(p.barcode, '') LIKE ?2 ESCAPE '\\' COLLATE NOCASE)
+         ORDER BY p.name COLLATE NOCASE, p.id
+         LIMIT ?3 OFFSET ?4",
+    )?;
+    let items = stmt
+        .query_map(params![business_id, pattern, limit, offset], |row| {
+            Ok(PosProduct {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                sku: row.get(2)?,
+                barcode: row.get(3)?,
+                base_unit_name: row.get(4)?,
+                selling_price: row.get(5)?,
+                quantity_on_hand: row.get(6)?,
+                base_unit_allows_decimals: row.get::<_, i64>(7)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PosProductPage { items, total_count })
+}
+
 pub fn list_products(
     conn: &Connection,
     business_id: &str,
@@ -1901,6 +1983,39 @@ mod tests {
         assert_eq!(second_page.items.len(), 1);
         assert_ne!(first_page.items[0].id, second_page.items[0].id);
         assert_eq!(no_match.total_count, 0);
+    }
+
+    #[test]
+    fn pos_search_returns_selling_data_and_stock_without_purchase_costs() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "POS-01");
+        let foreign = create_test_product(&conn, &other_business.id, "POS-02");
+        conn.execute(
+            "UPDATE products SET barcode = 'BARCODE-01' WHERE id = ?1",
+            params![product.id],
+        )
+        .unwrap();
+        set_opening_stock(&conn, &business.id, &product.id, 12_000, None).unwrap();
+        set_opening_stock(&conn, &other_business.id, &foreign.id, 99_000, None).unwrap();
+
+        let result = search_pos_products(&conn, &business.id, Some("BARCODE-01"), 0, 20).unwrap();
+        let serialized = serde_json::to_value(&result.items[0]).unwrap();
+        let no_match = search_pos_products(&conn, &business.id, Some("missing"), 0, 20).unwrap();
+
+        assert_eq!(result.total_count, 1);
+        assert_eq!(result.items[0].id, product.id);
+        assert_eq!(result.items[0].selling_price, product.selling_price);
+        assert_eq!(result.items[0].quantity_on_hand, 12_000);
+        assert_eq!(result.items[0].base_unit_name, "Bag");
+        assert!(serialized.get("purchase_price").is_none());
+        assert_eq!(no_match.total_count, 0);
+        assert!(no_match.items.is_empty());
+        assert!(matches!(
+            search_pos_products(&conn, &business.id, None, -1, 20),
+            Err(DbError::InvalidInput(_))
+        ));
     }
 
     #[test]
