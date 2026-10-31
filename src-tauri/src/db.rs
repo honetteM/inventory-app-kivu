@@ -915,6 +915,8 @@ pub struct InventoryItem {
     pub base_unit_name: String,
     pub quantity_on_hand: i64,
     pub min_stock_quantity: i64,
+    pub base_unit_allows_decimals: bool,
+    pub has_movements: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -984,7 +986,8 @@ pub fn list_inventory(
     )?;
     let mut stmt = conn.prepare(
         "SELECT p.id, p.name, p.sku, u.name,
-                COALESCE(ib.quantity_on_hand, 0), p.min_stock_quantity
+                COALESCE(ib.quantity_on_hand, 0), p.min_stock_quantity, u.decimals_ok,
+                EXISTS(SELECT 1 FROM stock_movements sm WHERE sm.product_id = p.id)
          FROM products p
          JOIN units u ON u.id = p.base_unit_id
          LEFT JOIN inventory_balances ib
@@ -1012,6 +1015,8 @@ pub fn list_inventory(
                 base_unit_name: row.get(3)?,
                 quantity_on_hand: row.get(4)?,
                 min_stock_quantity: row.get(5)?,
+                base_unit_allows_decimals: row.get::<_, i64>(6)? != 0,
+                has_movements: row.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1079,17 +1084,23 @@ pub fn set_opening_stock(
     }
 
     let reason = reason.map(str::trim).filter(|value| !value.is_empty());
-    let product_name: Option<String> = conn
+    let product: Option<(String, i64)> = conn
         .query_row(
-            "SELECT name FROM products
-             WHERE id = ?1 AND business_id = ?2 AND is_active = 1",
+            "SELECT p.name, u.decimals_ok FROM products p
+             JOIN units u ON u.id = p.base_unit_id
+             WHERE p.id = ?1 AND p.business_id = ?2 AND p.is_active = 1",
             params![product_id, business_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let product_name = product_name.ok_or_else(|| {
+    let (product_name, base_unit_allows_decimals) = product.ok_or_else(|| {
         DbError::InvalidInput("active product does not belong to this business".to_string())
     })?;
+    if base_unit_allows_decimals == 0 && quantity % 1000 != 0 {
+        return Err(DbError::InvalidInput(
+            "opening quantity must be a whole base unit".to_string(),
+        ));
+    }
 
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = now_utc();
@@ -1787,6 +1798,8 @@ mod tests {
         assert_eq!(inventory.total_count, 1);
         assert_eq!(inventory.items[0].quantity_on_hand, 125_000);
         assert_eq!(inventory.items[0].min_stock_quantity, 5_000);
+        assert!(!inventory.items[0].base_unit_allows_decimals);
+        assert!(inventory.items[0].has_movements);
         assert_eq!(movements.len(), 1);
         assert_eq!(movements[0].id, movement.id);
         assert_eq!(
@@ -1821,6 +1834,38 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn opening_stock_obeys_base_unit_decimal_rules() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let bags = create_test_product(&conn, &business.id, "STOCK-DECIMAL-BAG");
+        let cable = create_product(
+            &conn,
+            &business.id,
+            None,
+            None,
+            "Cable",
+            "STOCK-DECIMAL-CABLE",
+            None,
+            None,
+            None,
+            None,
+            "sys-unit-m",
+            1_000,
+            1_500,
+            0,
+            "standard",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            set_opening_stock(&conn, &business.id, &bags.id, 1_500, None),
+            Err(DbError::InvalidInput(_))
+        ));
+        let accepted = set_opening_stock(&conn, &business.id, &cable.id, 1_500, None).unwrap();
+        assert_eq!(accepted.new_quantity, 1_500);
     }
 
     #[test]

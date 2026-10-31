@@ -2,6 +2,7 @@ import { createBrowserRouter } from "react-router-dom";
 import { AppLayout } from "../layouts/app-layout";
 import { PagePlaceholder } from "@/components/shared/page-placeholder";
 import { DashboardPage } from "@/modules/dashboard/dashboard-page";
+import { InventoryPage } from "@/modules/inventory/inventory-page";
 import { ProductsPage } from "@/modules/products/products-page";
 import { BusinessSetupPage } from "@/modules/settings/business-setup-page";
 
@@ -17,7 +18,7 @@ export const router = createBrowserRouter([
       { index: true, element: <DashboardPage /> },
       { path: "pos", element: placeholder("Point of Sale", "Fast checkout for walk-in customers.") },
       { path: "products", element: <ProductsPage /> },
-      { path: "inventory", element: placeholder("Inventory", "Stock ledger, adjustments and low-stock alerts.") },
+      { path: "inventory", element: <InventoryPage /> },
       { path: "purchases", element: placeholder("Purchases", "Supplier invoices and stock receiving.") },
       { path: "sales", element: placeholder("Sales History", "Completed transactions and returns.") },
       { path: "customers", element: placeholder("Customers", "Customer accounts, credit limits and debts.") },
