@@ -116,6 +116,16 @@ function formatMoney(scaledAmount: number): string {
   return `${formattedWhole}${formattedFraction} RWF`;
 }
 
+function formatMoneyInput(scaledAmount: number): string {
+  if (!Number.isSafeInteger(scaledAmount)) {
+    return "";
+  }
+  const amount = BigInt(scaledAmount);
+  const whole = amount / MONEY_SCALE;
+  const fraction = amount % MONEY_SCALE;
+  return fraction === 0n ? whole.toString() : `${whole}.${fraction.toString().padStart(2, "0")}`;
+}
+
 function formatQuantity(scaledQuantity: number): string {
   if (!Number.isSafeInteger(scaledQuantity)) {
     return "Invalid quantity";
@@ -159,9 +169,11 @@ export function ProductsPage() {
   const [productUnits, setProductUnits] = useState<ProductUnit[]>([]);
   const [isLoadingProductUnits, setIsLoadingProductUnits] = useState(false);
   const [isSavingProductUnit, setIsSavingProductUnit] = useState(false);
+  const [isSavingSellingPrice, setIsSavingSellingPrice] = useState(false);
   const [sellingUnitId, setSellingUnitId] = useState("");
   const [conversionFactor, setConversionFactor] = useState("");
   const [unitSellingPrice, setUnitSellingPrice] = useState("");
+  const [baseSellingPriceEdit, setBaseSellingPriceEdit] = useState("");
   const [totalCount, setTotalCount] = useState(0);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
@@ -435,6 +447,45 @@ export function ProductsPage() {
     }
   }
 
+  async function handleBaseSellingPriceSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!businessId || !expandedProductId) {
+      setError("Select a product before changing its selling price.");
+      return;
+    }
+
+    setError(null);
+    setIsSavingSellingPrice(true);
+    try {
+      await invoke("product_selling_price_update", {
+        businessId,
+        productId: expandedProductId,
+        sellingPrice: toScaledDecimal(
+          baseSellingPriceEdit,
+          MONEY_SCALE,
+          2,
+          "Selling price",
+        ),
+      });
+      const result = await invoke<ProductPage>("product_list", {
+        businessId,
+        search: search.trim() || null,
+        offset: page * PAGE_SIZE,
+        limit: PAGE_SIZE,
+      });
+      setProducts(result.items);
+      setTotalCount(result.total_count);
+      const updatedProduct = result.items.find((product) => product.id === expandedProductId);
+      if (updatedProduct) {
+        setBaseSellingPriceEdit(formatMoneyInput(updatedProduct.selling_price));
+      }
+    } catch (cause) {
+      setError(`Could not update selling price. ${errorText(cause)}`);
+    } finally {
+      setIsSavingSellingPrice(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-7xl space-y-6">
       <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
@@ -651,7 +702,10 @@ export function ProductsPage() {
                             size="sm"
                             aria-expanded={expandedProductId === product.id}
                             aria-label={`${expandedProductId === product.id ? "Hide" : "Manage"} selling units for ${product.name}`}
-                            onClick={() => setExpandedProductId((current) => current === product.id ? null : product.id)}
+                            onClick={() => {
+                              setExpandedProductId((current) => current === product.id ? null : product.id);
+                              setBaseSellingPriceEdit(formatMoneyInput(product.selling_price));
+                            }}
                           >
                             {expandedProductId === product.id ? <ChevronUp /> : <ChevronDown />}
                             Manage
@@ -664,6 +718,37 @@ export function ProductsPage() {
                         <TableRow key={`${product.id}-units`}>
                           <TableCell colSpan={10} className="bg-muted/20">
                             <div className="space-y-4 p-2">
+                              <form
+                                className="grid gap-3 rounded-lg border bg-background p-4 md:grid-cols-[1fr_auto]"
+                                onSubmit={handleBaseSellingPriceSubmit}
+                              >
+                                <div className="space-y-2">
+                                  <Label htmlFor={`base-selling-price-${product.id}`}>
+                                    Selling price per {product.base_unit_name} (RWF)
+                                  </Label>
+                                  <Input
+                                    id={`base-selling-price-${product.id}`}
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    required
+                                    value={baseSellingPriceEdit}
+                                    onChange={(event) => setBaseSellingPriceEdit(event.target.value)}
+                                  />
+                                  <p className="text-xs text-muted-foreground">
+                                    Changing selling price does not change purchase costs or stock valuation.
+                                  </p>
+                                </div>
+                                <Button
+                                  type="submit"
+                                  className="self-end"
+                                  disabled={isSavingSellingPrice || isLoadingProductUnits || !baseSellingPriceEdit}
+                                >
+                                  {isSavingSellingPrice ? <LoaderCircle className="animate-spin" /> : <Plus />}
+                                  Save selling price
+                                </Button>
+                              </form>
+
                               <div>
                                 <h3 className="font-medium">Selling units for {product.name}</h3>
                                 <p className="text-sm text-muted-foreground">

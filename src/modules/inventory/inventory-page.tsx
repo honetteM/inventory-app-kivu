@@ -53,6 +53,7 @@ interface StockMovement {
   movement_type: string;
   quantity_delta: number;
   unit_cost: number | null;
+  total_cost: number | null;
   previous_quantity: number;
   new_quantity: number;
   reference_type: string | null;
@@ -692,10 +693,15 @@ export function InventoryPage() {
                                           <div>
                                             <p className="font-medium">{movementLabel(movement.movement_type)}</p>
                                             <p className="text-muted-foreground">
-                                              {movement.reason ?? movement.reference_id ?? "No reason recorded"}
-                                              {" · "}
-                                              {new Date(movement.created_at).toLocaleString()}
-                                              {movement.unit_cost !== null ? ` · ${formatMoney(movement.unit_cost)}/${selectedProduct?.base_unit_name ?? "unit"}` : ""}
+                                              {movement.reference_id ?? movement.reason ?? "No reference recorded"}
+                                              {movement.reason && movement.reference_id ? ` · ${movement.reason}` : ""}
+                                              {" · "}{new Date(movement.created_at).toLocaleString()}
+                                              {movement.unit_cost !== null
+                                                ? ` · ${formatMoney(movement.unit_cost)}/${selectedProduct?.base_unit_name ?? "unit"}`
+                                                : ""}
+                                              {movement.total_cost !== null
+                                                ? ` · ${movement.movement_type === "purchase_received" ? "Delivery total" : "Opening value"}: ${formatMoney(movement.total_cost)}`
+                                                : ""}
                                             </p>
                                           </div>
                                           <p className="text-right">

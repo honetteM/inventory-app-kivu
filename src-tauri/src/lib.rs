@@ -166,6 +166,18 @@ fn product_create(
 }
 
 #[tauri::command]
+fn product_selling_price_update(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    product_id: String,
+    selling_price: i64,
+) -> Result<(), String> {
+    state
+        .with(|conn| db::update_base_selling_price(conn, &business_id, &product_id, selling_price))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn product_unit_list(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -303,6 +315,7 @@ pub fn run() {
             product_list,
             pos_product_search,
             product_create,
+            product_selling_price_update,
             product_unit_list,
             product_unit_create,
             inventory_list,

@@ -20,6 +20,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "004_inventory_costing",
         include_str!("../migrations/004_inventory_costing.sql"),
     ),
+    (
+        5,
+        "005_receipt_cost_totals",
+        include_str!("../migrations/005_receipt_cost_totals.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -839,6 +844,75 @@ pub fn create_product(
     .map_err(DbError::from)
 }
 
+pub fn update_base_selling_price(
+    conn: &Connection,
+    business_id: &str,
+    product_id: &str,
+    selling_price: i64,
+) -> Result<(), DbError> {
+    if selling_price < 0 {
+        return Err(DbError::InvalidInput(
+            "selling price must not be negative".to_string(),
+        ));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    let product: Option<(String, i64)> = tx
+        .query_row(
+            "SELECT p.base_unit_id, p.selling_price
+             FROM products p
+             WHERE p.id = ?1 AND p.business_id = ?2 AND p.is_active = 1",
+            params![product_id, business_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (base_unit_id, current_price) = product.ok_or_else(|| {
+        DbError::InvalidInput("active product does not belong to this business".to_string())
+    })?;
+    if current_price == selling_price {
+        tx.commit()?;
+        return Ok(());
+    }
+
+    let updated = tx.execute(
+        "UPDATE products SET selling_price = ?1, updated_at = ?2
+         WHERE id = ?3 AND business_id = ?4",
+        params![selling_price, timestamp, product_id, business_id],
+    )?;
+    if updated != 1 {
+        return Err(DbError::InvalidInput(
+            "product does not belong to this business".to_string(),
+        ));
+    }
+    let base_unit_updated = tx.execute(
+        "UPDATE product_units SET selling_price = ?1, updated_at = ?2
+         WHERE product_id = ?3 AND unit_id = ?4 AND is_base = 1",
+        params![selling_price, timestamp, product_id, base_unit_id],
+    )?;
+    if base_unit_updated != 1 {
+        return Err(DbError::InvalidInput(
+            "product base selling unit is missing".to_string(),
+        ));
+    }
+
+    tx.execute(
+        "UPDATE product_prices SET effective_to = ?1
+         WHERE product_id = ?2 AND unit_id = ?3
+           AND price_type = 'selling' AND effective_to IS NULL",
+        params![timestamp, product_id, base_unit_id],
+    )?;
+    tx.execute(
+        "INSERT INTO product_prices
+            (id, product_id, price_type, unit_id, price, effective_from, created_at)
+         VALUES (?1, ?2, 'selling', ?3, ?4, ?5, ?5)",
+        params![id, product_id, base_unit_id, selling_price, timestamp],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct ProductUnit {
     pub id: String,
@@ -1023,6 +1097,7 @@ pub struct StockMovement {
     pub movement_type: String,
     pub quantity_delta: i64,
     pub unit_cost: Option<i64>,
+    pub total_cost: Option<i64>,
     pub previous_quantity: i64,
     pub new_quantity: i64,
     pub reference_type: Option<String>,
@@ -1150,7 +1225,7 @@ pub fn list_stock_movements(
 
     let mut stmt = conn.prepare(
         "SELECT sm.id, sm.business_id, sm.product_id, p.name, sm.movement_type,
-                sm.quantity_delta, sm.unit_cost, sm.previous_quantity, sm.new_quantity,
+                sm.quantity_delta, sm.unit_cost, sm.total_cost, sm.previous_quantity, sm.new_quantity,
                 sm.reference_type, sm.reference_id, sm.reason, sm.user_id, sm.created_at
          FROM stock_movements sm
          JOIN products p ON p.id = sm.product_id
@@ -1168,13 +1243,14 @@ pub fn list_stock_movements(
                 movement_type: row.get(4)?,
                 quantity_delta: row.get(5)?,
                 unit_cost: row.get(6)?,
-                previous_quantity: row.get(7)?,
-                new_quantity: row.get(8)?,
-                reference_type: row.get(9)?,
-                reference_id: row.get(10)?,
-                reason: row.get(11)?,
-                user_id: row.get(12)?,
-                created_at: row.get(13)?,
+                total_cost: row.get(7)?,
+                previous_quantity: row.get(8)?,
+                new_quantity: row.get(9)?,
+                reference_type: row.get(10)?,
+                reference_id: row.get(11)?,
+                reason: row.get(12)?,
+                user_id: row.get(13)?,
+                created_at: row.get(14)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1212,6 +1288,7 @@ pub fn set_opening_stock(
             "opening quantity must be a whole base unit".to_string(),
         ));
     }
+    let total_cost = stock_value(quantity, unit_cost)?;
 
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = now_utc();
@@ -1243,15 +1320,16 @@ pub fn set_opening_stock(
     )?;
     tx.execute(
         "INSERT INTO stock_movements
-            (id, business_id, product_id, movement_type, quantity_delta, unit_cost,
+            (id, business_id, product_id, movement_type, quantity_delta, unit_cost, total_cost,
              previous_quantity, new_quantity, reference_type, reference_id, reason, created_at)
-         VALUES (?1, ?2, ?3, 'opening_stock', ?4, ?5, 0, ?4, 'product', ?3, ?6, ?7)",
+         VALUES (?1, ?2, ?3, 'opening_stock', ?4, ?5, ?6, 0, ?4, 'product', ?3, ?7, ?8)",
         params![
             id,
             business_id,
             product_id,
             quantity,
             unit_cost,
+            total_cost,
             reason,
             timestamp
         ],
@@ -1266,6 +1344,7 @@ pub fn set_opening_stock(
         movement_type: "opening_stock".to_string(),
         quantity_delta: quantity,
         unit_cost: Some(unit_cost),
+        total_cost: Some(total_cost),
         previous_quantity: 0,
         new_quantity: quantity,
         reference_type: Some("product".to_string()),
@@ -1381,6 +1460,7 @@ pub fn correct_stock(
         movement_type: "stock_correction".to_string(),
         quantity_delta,
         unit_cost: Some(average_unit_cost),
+        total_cost: None,
         previous_quantity,
         new_quantity: target_quantity,
         reference_type: Some("product".to_string()),
@@ -1410,6 +1490,7 @@ pub fn receive_stock(
             "received unit cost must not be negative".to_string(),
         ));
     }
+    let total_cost = stock_value(quantity, received_unit_cost)?;
     let receipt_reference = receipt_reference.trim();
     if receipt_reference.is_empty() || receipt_reference.chars().count() > 200 {
         return Err(DbError::InvalidInput(
@@ -1503,16 +1584,17 @@ pub fn receive_stock(
     )?;
     tx.execute(
         "INSERT INTO stock_movements
-            (id, business_id, product_id, movement_type, quantity_delta, unit_cost,
+            (id, business_id, product_id, movement_type, quantity_delta, unit_cost, total_cost,
              previous_quantity, new_quantity, reference_type, reference_id, reason, created_at)
-         VALUES (?1, ?2, ?3, 'purchase_received', ?4, ?5, ?6, ?7,
-                 'supplier_document', ?8, ?9, ?10)",
+         VALUES (?1, ?2, ?3, 'purchase_received', ?4, ?5, ?6, ?7, ?8,
+                 'supplier_document', ?9, ?10, ?11)",
         params![
             id,
             business_id,
             product_id,
             quantity,
             received_unit_cost,
+            total_cost,
             previous_quantity,
             new_quantity,
             receipt_reference,
@@ -1530,6 +1612,7 @@ pub fn receive_stock(
         movement_type: "purchase_received".to_string(),
         quantity_delta: quantity,
         unit_cost: Some(received_unit_cost),
+        total_cost: Some(total_cost),
         previous_quantity,
         new_quantity,
         reference_type: Some("supplier_document".to_string()),
@@ -1669,8 +1752,79 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let movement_total: i64 = conn
+            .query_row(
+                "SELECT total_cost FROM stock_movements WHERE id = 'legacy-movement'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(balance_cost, product.purchase_price);
         assert_eq!(movement_cost, product.purchase_price);
+        assert_eq!(movement_total, 20_000);
+    }
+
+    #[test]
+    fn selling_price_update_preserves_purchase_cost_and_records_price_history() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "PRICE-UPDATE-01");
+        let new_price = 70_000;
+
+        update_base_selling_price(&conn, &business.id, &product.id, new_price).unwrap();
+        let updated = list_products(&conn, &business.id, Some("PRICE-UPDATE-01"), 0, 20).unwrap();
+        let base_unit_price: i64 = conn
+            .query_row(
+                "SELECT pu.selling_price
+                 FROM product_units pu
+                 JOIN products p ON p.id = pu.product_id
+                 WHERE p.id = ?1 AND pu.is_base = 1",
+                params![product.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let history: Vec<(i64, Option<String>)> = conn
+            .prepare(
+                "SELECT price, effective_to FROM product_prices
+                 WHERE product_id = ?1 AND price_type = 'selling' AND unit_id = ?2
+                 ORDER BY effective_to IS NULL",
+            )
+            .unwrap()
+            .query_map(params![product.id, product.base_unit_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(updated.items[0].purchase_price, product.purchase_price);
+        assert_eq!(updated.items[0].selling_price, new_price);
+        assert_eq!(base_unit_price, new_price);
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .any(|(price, ended)| { *price == product.selling_price && ended.is_some() })
+        );
+        assert!(
+            history
+                .iter()
+                .any(|(price, ended)| { *price == new_price && ended.is_none() })
+        );
+        let pos_products =
+            search_pos_products(&conn, &business.id, Some("PRICE-UPDATE-01"), 0, 10).unwrap();
+        assert_eq!(pos_products.items[0].selling_price, new_price);
+
+        update_base_selling_price(&conn, &business.id, &product.id, new_price).unwrap();
+        assert!(matches!(
+            update_base_selling_price(&conn, &business.id, &product.id, -1),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            update_base_selling_price(&conn, &other_business.id, &product.id, 80_000),
+            Err(DbError::InvalidInput(_))
+        ));
     }
 
     #[test]
@@ -2442,6 +2596,7 @@ mod tests {
         assert_eq!(receipt.movement_type, "purchase_received");
         assert_eq!(receipt.quantity_delta, 3_000);
         assert_eq!(receipt.unit_cost, Some(20_000));
+        assert_eq!(receipt.total_cost, Some(60_000));
         assert_eq!(receipt.previous_quantity, 5_000);
         assert_eq!(receipt.new_quantity, 8_000);
         assert_eq!(receipt.reference_type.as_deref(), Some("supplier_document"));
@@ -2453,6 +2608,14 @@ mod tests {
         assert_eq!(movements.len(), 2);
         assert!(movements.iter().any(|movement| movement.id == opening.id));
         assert!(movements.iter().any(|movement| movement.id == receipt.id));
+        assert_eq!(
+            movements
+                .iter()
+                .find(|movement| movement.id == receipt.id)
+                .unwrap()
+                .total_cost,
+            Some(60_000)
+        );
     }
 
     #[test]
