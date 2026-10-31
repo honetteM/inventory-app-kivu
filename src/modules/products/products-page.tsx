@@ -31,6 +31,11 @@ interface Category {
   name: string;
 }
 
+interface Brand {
+  id: string;
+  name: string;
+}
+
 interface Unit {
   id: string;
   code: string;
@@ -44,6 +49,7 @@ interface Product {
   sku: string;
   barcode: string | null;
   category_name: string | null;
+  brand_name: string | null;
   base_unit_name: string;
   base_unit_code: string;
   purchase_price: number;
@@ -108,6 +114,7 @@ export function ProductsPage() {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessId, setBusinessId] = useState("");
   const [categories, setCategories] = useState<Category[]>([]);
+  const [brands, setBrands] = useState<Brand[]>([]);
   const [units, setUnits] = useState<Unit[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -123,6 +130,7 @@ export function ProductsPage() {
   const [sku, setSku] = useState("");
   const [barcode, setBarcode] = useState("");
   const [categoryId, setCategoryId] = useState("");
+  const [brandId, setBrandId] = useState("");
   const [baseUnitId, setBaseUnitId] = useState("");
   const [purchasePrice, setPurchasePrice] = useState("");
   const [sellingPrice, setSellingPrice] = useState("");
@@ -167,6 +175,7 @@ export function ProductsPage() {
   useEffect(() => {
     if (!businessId) {
       setCategories([]);
+      setBrands([]);
       setUnits([]);
       setProducts([]);
       setTotalCount(0);
@@ -179,11 +188,13 @@ export function ProductsPage() {
     setError(null);
     Promise.all([
       invoke<Category[]>("category_list", { businessId }),
+      invoke<Brand[]>("brand_list", { businessId }),
       invoke<Unit[]>("unit_list", { businessId }),
     ])
-      .then(([categoryResult, unitResult]) => {
+      .then(([categoryResult, brandResult, unitResult]) => {
         if (active) {
           setCategories(categoryResult);
+          setBrands(brandResult);
           setUnits(unitResult);
           setBaseUnitId((current) =>
             unitResult.some((unit) => unit.id === current && unit.is_active)
@@ -259,7 +270,7 @@ export function ProductsPage() {
       await invoke<Product>("product_create", {
         businessId,
         categoryId: categoryId || null,
-        brandId: null,
+        brandId: brandId || null,
         name: name.trim(),
         sku: sku.trim(),
         barcode: barcode.trim() || null,
@@ -277,6 +288,7 @@ export function ProductsPage() {
       setSku("");
       setBarcode("");
       setCategoryId("");
+      setBrandId("");
       setPurchasePrice("");
       setSellingPrice("");
       setMinimumStock("");
@@ -391,6 +403,13 @@ export function ProductsPage() {
                     </select>
                   </div>
                   <div className="space-y-2">
+                    <Label htmlFor="product-brand">Brand (optional)</Label>
+                    <select id="product-brand" value={brandId} onChange={(event) => setBrandId(event.target.value)} className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+                      <option value="">No brand</option>
+                      {brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="space-y-2">
                     <Label htmlFor="product-unit">Base unit</Label>
                     <select id="product-unit" required value={baseUnitId} onChange={(event) => setBaseUnitId(event.target.value)} className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
                       {availableUnits.map((unit) => <option key={unit.id} value={unit.id}>{unit.name} ({unit.code})</option>)}
@@ -475,6 +494,7 @@ export function ProductsPage() {
                       <TableHead>Product</TableHead>
                       <TableHead>SKU</TableHead>
                       <TableHead>Category</TableHead>
+                      <TableHead>Brand</TableHead>
                       <TableHead>Base unit</TableHead>
                       <TableHead className="text-right">Purchase</TableHead>
                       <TableHead className="text-right">Selling</TableHead>
@@ -491,6 +511,7 @@ export function ProductsPage() {
                         </TableCell>
                         <TableCell>{product.sku}</TableCell>
                         <TableCell>{product.category_name ?? "—"}</TableCell>
+                        <TableCell>{product.brand_name ?? "—"}</TableCell>
                         <TableCell>{product.base_unit_name}</TableCell>
                         <TableCell className="text-right">{formatMoney(product.purchase_price)}</TableCell>
                         <TableCell className="text-right">{formatMoney(product.selling_price)}</TableCell>

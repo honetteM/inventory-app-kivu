@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { BrandManagementSection } from "./brand-management-section";
 import { CategoryManagementSection } from "./category-management-section";
 import { UnitManagementSection } from "./unit-management-section";
 
@@ -178,6 +179,7 @@ export function BusinessSetupPage() {
 
       <UnitManagementSection businesses={businesses} />
       <CategoryManagementSection businesses={businesses} />
+      <BrandManagementSection businesses={businesses} />
     </div>
   );
 }
