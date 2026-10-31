@@ -152,6 +152,40 @@ fn product_create(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn product_unit_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    product_id: String,
+) -> Result<Vec<db::ProductUnit>, String> {
+    state
+        .with(|conn| db::list_product_units(conn, &business_id, &product_id))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn product_unit_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    product_id: String,
+    unit_id: String,
+    conversion_factor: i64,
+    selling_price: Option<i64>,
+) -> Result<db::ProductUnit, String> {
+    state
+        .with(|conn| {
+            db::create_product_unit(
+                conn,
+                &business_id,
+                &product_id,
+                &unit_id,
+                conversion_factor,
+                selling_price,
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -173,7 +207,11 @@ pub fn run() {
             brand_list,
             brand_create,
             product_list,
-            product_create
+            product_create,
+            product_unit_list,
+            product_unit_create,
+            product_unit_list,
+            product_unit_create
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

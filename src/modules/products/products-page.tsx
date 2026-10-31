@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { LoaderCircle, PackagePlus, Search } from "lucide-react";
+import { ChevronDown, ChevronUp, LoaderCircle, PackagePlus, Plus, Search } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -64,12 +64,38 @@ interface ProductPage {
   total_count: number;
 }
 
+interface ProductUnit {
+  id: string;
+  product_id: string;
+  unit_id: string;
+  unit_name: string;
+  unit_code: string;
+  conversion_factor: number;
+  is_base: boolean;
+  selling_price: number | null;
+}
+
 function toScaledInteger(value: string, scale: bigint, field: string): number {
   if (!/^\d+$/.test(value)) {
     throw new Error(`${field} must be a whole non-negative number.`);
   }
 
   const scaled = BigInt(value) * scale;
+  if (scaled > MAX_SAFE_INTEGER) {
+    throw new Error(`${field} is too large.`);
+  }
+
+  return Number(scaled);
+}
+
+function toScaledDecimal(value: string, scale: bigint, decimalPlaces: number, field: string): number {
+  const match = new RegExp(`^(\\d+)(?:\\.(\\d{1,${decimalPlaces}}))?$`).exec(value);
+  if (!match) {
+    throw new Error(`${field} must be a non-negative number with up to ${decimalPlaces} decimal places.`);
+  }
+
+  const fraction = (match[2] ?? "").padEnd(decimalPlaces, "0");
+  const scaled = BigInt(match[1]) * scale + BigInt(fraction || "0");
   if (scaled > MAX_SAFE_INTEGER) {
     throw new Error(`${field} is too large.`);
   }
@@ -106,6 +132,18 @@ function formatQuantity(scaledQuantity: number): string {
   return `${formattedWhole}.${fraction.toString().padStart(3, "0").replace(/0+$/, "")}`;
 }
 
+function formatConversion(scaledFactor: number): string {
+  if (!Number.isSafeInteger(scaledFactor) || scaledFactor <= 0) {
+    return "Invalid conversion";
+  }
+
+  const factor = BigInt(scaledFactor);
+  const whole = factor / QUANTITY_SCALE;
+  const fraction = factor % QUANTITY_SCALE;
+  const formattedFraction = fraction === 0n ? "" : `.${fraction.toString().padStart(3, "0").replace(/0+$/, "")}`;
+  return `${whole}${formattedFraction}`;
+}
+
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
@@ -117,6 +155,13 @@ export function ProductsPage() {
   const [brands, setBrands] = useState<Brand[]>([]);
   const [units, setUnits] = useState<Unit[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [expandedProductId, setExpandedProductId] = useState<string | null>(null);
+  const [productUnits, setProductUnits] = useState<ProductUnit[]>([]);
+  const [isLoadingProductUnits, setIsLoadingProductUnits] = useState(false);
+  const [isSavingProductUnit, setIsSavingProductUnit] = useState(false);
+  const [sellingUnitId, setSellingUnitId] = useState("");
+  const [conversionFactor, setConversionFactor] = useState("");
+  const [unitSellingPrice, setUnitSellingPrice] = useState("");
   const [totalCount, setTotalCount] = useState(0);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
@@ -144,6 +189,10 @@ export function ProductsPage() {
   const firstItem = totalCount === 0 ? 0 : page * PAGE_SIZE + 1;
   const lastItem = Math.min((page + 1) * PAGE_SIZE, totalCount);
   const availableUnits = useMemo(() => units.filter((unit) => unit.is_active), [units]);
+  const availableSellingUnits = useMemo(
+    () => availableUnits.filter((unit) => !productUnits.some((productUnit) => productUnit.unit_id === unit.id)),
+    [availableUnits, productUnits],
+  );
 
   useEffect(() => {
     let active = true;
@@ -257,6 +306,45 @@ export function ProductsPage() {
     };
   }, [businessId, page, search]);
 
+  useEffect(() => {
+    if (!businessId || !expandedProductId) {
+      setProductUnits([]);
+      setSellingUnitId("");
+      return;
+    }
+
+    let active = true;
+    setIsLoadingProductUnits(true);
+    setProductUnits([]);
+    setError(null);
+    invoke<ProductUnit[]>("product_unit_list", {
+      businessId,
+      productId: expandedProductId,
+    })
+      .then((result) => {
+        if (active) {
+          setProductUnits(result);
+          setSellingUnitId((current) =>
+            result.some((unit) => unit.unit_id === current) ? current : "",
+          );
+        }
+      })
+      .catch((cause: unknown) => {
+        if (active) {
+          setError(`Could not load product units. ${errorText(cause)}`);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsLoadingProductUnits(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [businessId, expandedProductId]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!businessId || !baseUnitId) {
@@ -310,6 +398,40 @@ export function ProductsPage() {
       setError(`Could not save product. ${errorText(cause)}`);
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function handleProductUnitSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!businessId || !expandedProductId || !sellingUnitId) {
+      setError("Select a selling unit before adding its conversion.");
+      return;
+    }
+
+    setError(null);
+    setIsSavingProductUnit(true);
+    try {
+      await invoke<ProductUnit>("product_unit_create", {
+        businessId,
+        productId: expandedProductId,
+        unitId: sellingUnitId,
+        conversionFactor: toScaledDecimal(conversionFactor, QUANTITY_SCALE, 3, "Conversion factor"),
+        sellingPrice: unitSellingPrice.trim()
+          ? toScaledInteger(unitSellingPrice, MONEY_SCALE, "Unit selling price")
+          : null,
+      });
+      const result = await invoke<ProductUnit[]>("product_unit_list", {
+        businessId,
+        productId: expandedProductId,
+      });
+      setProductUnits(result);
+      setSellingUnitId("");
+      setConversionFactor("");
+      setUnitSellingPrice("");
+    } catch (cause) {
+      setError(`Could not save product unit. ${errorText(cause)}`);
+    } finally {
+      setIsSavingProductUnit(false);
     }
   }
 
@@ -500,6 +622,7 @@ export function ProductsPage() {
                       <TableHead className="text-right">Selling</TableHead>
                       <TableHead className="text-right">Min. stock</TableHead>
                       <TableHead>Status</TableHead>
+                      <TableHead>Units</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -521,8 +644,112 @@ export function ProductsPage() {
                             {product.is_active ? "Active" : "Inactive"}
                           </Badge>
                         </TableCell>
+                        <TableCell>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            aria-expanded={expandedProductId === product.id}
+                            aria-label={`${expandedProductId === product.id ? "Hide" : "Manage"} selling units for ${product.name}`}
+                            onClick={() => setExpandedProductId((current) => current === product.id ? null : product.id)}
+                          >
+                            {expandedProductId === product.id ? <ChevronUp /> : <ChevronDown />}
+                            Manage
+                          </Button>
+                        </TableCell>
                       </TableRow>
                     ))}
+                    {products.map((product) =>
+                      expandedProductId === product.id ? (
+                        <TableRow key={`${product.id}-units`}>
+                          <TableCell colSpan={10} className="bg-muted/20">
+                            <div className="space-y-4 p-2">
+                              <div>
+                                <h3 className="font-medium">Selling units for {product.name}</h3>
+                                <p className="text-sm text-muted-foreground">
+                                  Conversion factor means how many base units are in one selling unit. Use up to three decimal places.
+                                </p>
+                              </div>
+
+                              {isLoadingProductUnits ? (
+                                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                                  <LoaderCircle className="size-4 animate-spin" />
+                                  Loading product units...
+                                </div>
+                              ) : (
+                                <>
+                                  <div className="flex flex-wrap gap-2">
+                                    {productUnits.map((unit) => (
+                                      <Badge key={unit.id} variant={unit.is_base ? "secondary" : "outline"}>
+                                        {unit.unit_name}: 1 {unit.unit_code} = {formatConversion(unit.conversion_factor)} {product.base_unit_code}
+                                        {unit.selling_price !== null ? ` · ${formatMoney(unit.selling_price)}` : ""}
+                                        {unit.is_base ? " · base" : ""}
+                                      </Badge>
+                                    ))}
+                                  </div>
+
+                                  {availableSellingUnits.length > 0 ? (
+                                    <form className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_auto]" onSubmit={handleProductUnitSubmit}>
+                                      <div className="space-y-2">
+                                        <Label htmlFor={`selling-unit-${product.id}`}>Selling unit</Label>
+                                        <select
+                                          id={`selling-unit-${product.id}`}
+                                          required
+                                          value={sellingUnitId}
+                                          onChange={(event) => setSellingUnitId(event.target.value)}
+                                          className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                                        >
+                                          <option value="">Select unit</option>
+                                          {availableSellingUnits.map((unit) => (
+                                            <option key={unit.id} value={unit.id}>{unit.name} ({unit.code})</option>
+                                          ))}
+                                        </select>
+                                      </div>
+                                      <div className="space-y-2">
+                                        <Label htmlFor={`conversion-${product.id}`}>Base units per selling unit</Label>
+                                        <Input
+                                          id={`conversion-${product.id}`}
+                                          type="number"
+                                          min="0.001"
+                                          step="0.001"
+                                          required
+                                          value={conversionFactor}
+                                          onChange={(event) => setConversionFactor(event.target.value)}
+                                          placeholder="e.g. 100"
+                                        />
+                                      </div>
+                                      <div className="space-y-2">
+                                        <Label htmlFor={`unit-price-${product.id}`}>Selling price (RWF, optional)</Label>
+                                        <Input
+                                          id={`unit-price-${product.id}`}
+                                          type="number"
+                                          min="0"
+                                          step="1"
+                                          value={unitSellingPrice}
+                                          onChange={(event) => setUnitSellingPrice(event.target.value)}
+                                        />
+                                      </div>
+                                      <Button
+                                        type="submit"
+                                        className="self-end"
+                                        disabled={isSavingProductUnit || isLoadingProductUnits || !sellingUnitId || !conversionFactor}
+                                      >
+                                        {isSavingProductUnit ? <LoaderCircle className="animate-spin" /> : <Plus />}
+                                        Add unit
+                                      </Button>
+                                    </form>
+                                  ) : (
+                                    <p className="text-sm text-muted-foreground">
+                                      No other active units are available. Add a unit in Settings first.
+                                    </p>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ) : null,
+                    )}
                   </TableBody>
                 </Table>
               )}

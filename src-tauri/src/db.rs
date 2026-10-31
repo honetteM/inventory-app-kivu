@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
@@ -748,6 +748,161 @@ pub fn create_product(
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct ProductUnit {
+    pub id: String,
+    pub product_id: String,
+    pub unit_id: String,
+    pub unit_name: String,
+    pub unit_code: String,
+    pub conversion_factor: i64,
+    pub is_base: bool,
+    pub selling_price: Option<i64>,
+}
+
+pub fn list_product_units(
+    conn: &Connection,
+    business_id: &str,
+    product_id: &str,
+) -> Result<Vec<ProductUnit>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT pu.id, pu.product_id, pu.unit_id, u.name, u.code,
+                pu.conversion_factor, pu.is_base, pu.selling_price
+         FROM product_units pu
+         JOIN products p ON p.id = pu.product_id
+         JOIN units u ON u.id = pu.unit_id
+         WHERE p.id = ?1 AND p.business_id = ?2
+         ORDER BY pu.is_base DESC, pu.sort_order, u.name COLLATE NOCASE",
+    )?;
+    let units = stmt
+        .query_map(params![product_id, business_id], |row| {
+            Ok(ProductUnit {
+                id: row.get(0)?,
+                product_id: row.get(1)?,
+                unit_id: row.get(2)?,
+                unit_name: row.get(3)?,
+                unit_code: row.get(4)?,
+                conversion_factor: row.get(5)?,
+                is_base: row.get::<_, i64>(6)? != 0,
+                selling_price: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(units)
+}
+
+pub fn create_product_unit(
+    conn: &Connection,
+    business_id: &str,
+    product_id: &str,
+    unit_id: &str,
+    conversion_factor: i64,
+    selling_price: Option<i64>,
+) -> Result<ProductUnit, DbError> {
+    if conversion_factor <= 0 {
+        return Err(DbError::InvalidInput(
+            "conversion factor must be greater than zero".to_string(),
+        ));
+    }
+    if selling_price.is_some_and(|price| price < 0) {
+        return Err(DbError::InvalidInput(
+            "selling price must not be negative".to_string(),
+        ));
+    }
+
+    let product: Option<(String, String, i64)> = conn
+        .query_row(
+            "SELECT p.id, p.base_unit_id, base_unit.decimals_ok
+             FROM products p
+             JOIN units base_unit ON base_unit.id = p.base_unit_id
+             WHERE p.id = ?1 AND p.business_id = ?2",
+            params![product_id, business_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let (_, base_unit_id, base_unit_decimals_ok) = product
+        .ok_or_else(|| DbError::InvalidInput("product does not belong to this business".into()))?;
+
+    if unit_id == base_unit_id {
+        return Err(DbError::InvalidInput(
+            "the base unit is already configured for this product".to_string(),
+        ));
+    }
+
+    let unit_is_available: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM units
+            WHERE id = ?1 AND (business_id IS NULL OR business_id = ?2) AND is_active = 1
+         )",
+        params![unit_id, business_id],
+        |row| row.get(0),
+    )?;
+    if !unit_is_available {
+        return Err(DbError::InvalidInput(
+            "selling unit must be active and available to this business".to_string(),
+        ));
+    }
+
+    if base_unit_decimals_ok == 0 && conversion_factor % 1000 != 0 {
+        return Err(DbError::InvalidInput(
+            "fractional base-unit conversions require a base unit that allows decimals".to_string(),
+        ));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO product_units
+            (id, product_id, unit_id, conversion_factor, is_base, selling_price, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?6)",
+        params![
+            id,
+            product_id,
+            unit_id,
+            conversion_factor,
+            selling_price,
+            timestamp
+        ],
+    )?;
+    if let Some(price) = selling_price {
+        tx.execute(
+            "INSERT INTO product_prices (id, product_id, price_type, unit_id, price, effective_from, created_at)
+             VALUES (?1, ?2, 'selling', ?3, ?4, ?5, ?5)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                product_id,
+                unit_id,
+                price,
+                timestamp
+            ],
+        )?;
+    }
+    tx.commit()?;
+
+    conn.query_row(
+        "SELECT pu.id, pu.product_id, pu.unit_id, u.name, u.code,
+                pu.conversion_factor, pu.is_base, pu.selling_price
+         FROM product_units pu
+         JOIN units u ON u.id = pu.unit_id
+         WHERE pu.id = ?1",
+        params![id],
+        |row| {
+            Ok(ProductUnit {
+                id: row.get(0)?,
+                product_id: row.get(1)?,
+                unit_id: row.get(2)?,
+                unit_name: row.get(3)?,
+                unit_code: row.get(4)?,
+                conversion_factor: row.get(5)?,
+                is_base: row.get::<_, i64>(6)? != 0,
+                selling_price: row.get(7)?,
+            })
+        },
+    )
+    .map_err(DbError::from)
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct DbInfo {
     pub schema_version: i64,
     pub applied_migrations: i64,
@@ -1158,5 +1313,188 @@ mod tests {
         ));
         assert!(create_brand(&conn, &business.id, "BuildPro").is_err());
         assert_eq!(list_brands(&conn, &business.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn product_units_store_conversion_and_optional_price_history() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let unit = create_unit(&conn, &business.id, "roll", "Roll", false).unwrap();
+        let product = create_product(
+            &conn,
+            &business.id,
+            None,
+            None,
+            "Electrical cable",
+            "CABLE-01",
+            None,
+            None,
+            None,
+            None,
+            "sys-unit-m",
+            1_000,
+            1_500,
+            0,
+            "standard",
+        )
+        .unwrap();
+
+        let product_unit = create_product_unit(
+            &conn,
+            &business.id,
+            &product.id,
+            &unit.id,
+            100_000,
+            Some(120_000),
+        )
+        .unwrap();
+        let units = list_product_units(&conn, &business.id, &product.id).unwrap();
+
+        assert_eq!(product_unit.conversion_factor, 100_000);
+        assert_eq!(product_unit.unit_code, "roll");
+        assert_eq!(product_unit.selling_price, Some(120_000));
+        assert_eq!(units.len(), 2);
+        assert!(units[0].is_base);
+        assert!(!units[1].is_base);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM product_prices
+                 WHERE product_id = ?1 AND price_type = 'selling' AND unit_id = ?2 AND price = 120000",
+                params![product.id, unit.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn product_unit_validation_prevents_invalid_or_cross_business_conversions() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let bag = create_unit(&conn, &business.id, "bagx", "Bag custom", false).unwrap();
+        let foreign_unit = create_unit(&conn, &other_business.id, "box", "Box", false).unwrap();
+        let product = create_product(
+            &conn,
+            &business.id,
+            None,
+            None,
+            "Cement",
+            "CEM-01",
+            None,
+            None,
+            None,
+            None,
+            "sys-unit-bag",
+            10_000,
+            12_000,
+            0,
+            "standard",
+        )
+        .unwrap();
+        let decimal_base_product = create_product(
+            &conn,
+            &business.id,
+            None,
+            None,
+            "Cable",
+            "CAB-01",
+            None,
+            None,
+            None,
+            None,
+            "sys-unit-m",
+            1_000,
+            1_500,
+            0,
+            "standard",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            create_product_unit(&conn, &business.id, &product.id, &bag.id, 0, None),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_product_unit(&conn, &business.id, &product.id, &bag.id, 1_500, None),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_product_unit(
+                &conn,
+                &business.id,
+                &product.id,
+                &foreign_unit.id,
+                2_000,
+                None
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_product_unit(
+                &conn,
+                &other_business.id,
+                &product.id,
+                &foreign_unit.id,
+                2_000,
+                None
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_product_unit(
+                &conn,
+                &business.id,
+                &decimal_base_product.id,
+                &bag.id,
+                -1_000,
+                Some(-1)
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(
+            list_product_units(&conn, &business.id, &product.id)
+                .unwrap()
+                .len()
+                == 1
+        );
+        assert!(
+            list_product_units(&conn, &other_business.id, &product.id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn product_units_allow_fractional_conversion_when_base_unit_supports_decimals() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let half_roll = create_unit(&conn, &business.id, "halfroll", "Half roll", false).unwrap();
+        let product = create_product(
+            &conn,
+            &business.id,
+            None,
+            None,
+            "Cable",
+            "CAB-02",
+            None,
+            None,
+            None,
+            None,
+            "sys-unit-m",
+            1_000,
+            1_500,
+            0,
+            "standard",
+        )
+        .unwrap();
+
+        let product_unit =
+            create_product_unit(&conn, &business.id, &product.id, &half_roll.id, 1_500, None)
+                .unwrap();
+
+        assert_eq!(product_unit.conversion_factor, 1_500);
+        assert_eq!(product_unit.selling_price, None);
     }
 }
