@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { CategoryManagementSection } from "./category-management-section";
 import { UnitManagementSection } from "./unit-management-section";
 
 interface Business {
@@ -176,6 +177,7 @@ export function BusinessSetupPage() {
       </Card>
 
       <UnitManagementSection businesses={businesses} />
+      <CategoryManagementSection businesses={businesses} />
     </div>
   );
 }
