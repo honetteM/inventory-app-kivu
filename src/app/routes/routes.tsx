@@ -1,0 +1,30 @@
+import { createBrowserRouter } from "react-router-dom";
+import { AppLayout } from "../layouts/app-layout";
+import { PagePlaceholder } from "@/components/shared/page-placeholder";
+import { DashboardPage } from "@/modules/dashboard/dashboard-page";
+
+const placeholder = (title: string, description: string) => (
+  <PagePlaceholder title={title} description={description} />
+);
+
+export const router = createBrowserRouter([
+  {
+    path: "/",
+    element: <AppLayout />,
+    children: [
+      { index: true, element: <DashboardPage /> },
+      { path: "pos", element: placeholder("Point of Sale", "Fast checkout for walk-in customers.") },
+      { path: "products", element: placeholder("Products", "Product catalogue with units, prices and categories.") },
+      { path: "inventory", element: placeholder("Inventory", "Stock ledger, adjustments and low-stock alerts.") },
+      { path: "purchases", element: placeholder("Purchases", "Supplier invoices and stock receiving.") },
+      { path: "sales", element: placeholder("Sales History", "Completed transactions and returns.") },
+      { path: "customers", element: placeholder("Customers", "Customer accounts, credit limits and debts.") },
+      { path: "suppliers", element: placeholder("Suppliers", "Supplier balances and payment history.") },
+      { path: "expenses", element: placeholder("Expenses", "Operational expense tracking.") },
+      { path: "payments", element: placeholder("Payments", "Customer repayments and supplier payments.") },
+      { path: "reports", element: placeholder("Reports", "Daily, weekly and monthly business reports.") },
+      { path: "employees", element: placeholder("Employees", "Users, roles and permissions.") },
+      { path: "settings", element: placeholder("Settings", "Business configuration, backups and tax settings.") },
+    ],
+  },
+]);

@@ -1,0 +1,38 @@
+import {
+  BarChart3,
+  Boxes,
+  Factory,
+  HandCoins,
+  LayoutDashboard,
+  Package,
+  ReceiptText,
+  Settings,
+  ShoppingCart,
+  Truck,
+  UserCog,
+  Users,
+  Wallet,
+  type LucideIcon,
+} from "lucide-react";
+
+export interface NavItem {
+  title: string;
+  url: string;
+  icon: LucideIcon;
+}
+
+export const mainNav: NavItem[] = [
+  { title: "Dashboard", url: "/", icon: LayoutDashboard },
+  { title: "Point of Sale", url: "/pos", icon: ShoppingCart },
+  { title: "Products", url: "/products", icon: Package },
+  { title: "Inventory", url: "/inventory", icon: Boxes },
+  { title: "Purchases", url: "/purchases", icon: Truck },
+  { title: "Sales History", url: "/sales", icon: ReceiptText },
+  { title: "Customers", url: "/customers", icon: Users },
+  { title: "Suppliers", url: "/suppliers", icon: Factory },
+  { title: "Expenses", url: "/expenses", icon: Wallet },
+  { title: "Payments", url: "/payments", icon: HandCoins },
+  { title: "Reports", url: "/reports", icon: BarChart3 },
+  { title: "Employees", url: "/employees", icon: UserCog },
+  { title: "Settings", url: "/settings", icon: Settings },
+];
