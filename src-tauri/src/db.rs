@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
@@ -20,6 +20,8 @@ pub enum DbError {
     Io(#[from] std::io::Error),
     #[error("migration {0} failed: {1}")]
     Migration(i64, String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     #[error("internal error: state lock poisoned")]
     LockPoisoned,
 }
@@ -110,6 +112,78 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), DbError> {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct Business {
+    pub id: String,
+    pub name: String,
+    pub tax_id: Option<String>,
+    pub currency: String,
+    pub timezone: String,
+    pub date_format: String,
+    pub language: String,
+}
+
+pub fn list_businesses(conn: &Connection) -> Result<Vec<Business>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, tax_id, currency, timezone, date_format, language
+         FROM businesses ORDER BY name",
+    )?;
+    let businesses = stmt
+        .query_map([], |row| {
+            Ok(Business {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                tax_id: row.get(2)?,
+                currency: row.get(3)?,
+                timezone: row.get(4)?,
+                date_format: row.get(5)?,
+                language: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(businesses)
+}
+
+pub fn create_business(
+    conn: &Connection,
+    name: &str,
+    tax_id: Option<&str>,
+) -> Result<Business, DbError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(DbError::InvalidInput(
+            "business name must not be empty".to_string(),
+        ));
+    }
+
+    let tax_id = tax_id.map(str::trim).filter(|value| !value.is_empty());
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+
+    conn.execute(
+        "INSERT INTO businesses (id, name, tax_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![id, name, tax_id, timestamp],
+    )?;
+
+    Ok(conn.query_row(
+        "SELECT id, name, tax_id, currency, timezone, date_format, language
+         FROM businesses WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(Business {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                tax_id: row.get(2)?,
+                currency: row.get(3)?,
+                timezone: row.get(4)?,
+                date_format: row.get(5)?,
+                language: row.get(6)?,
+            })
+        },
+    )?)
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct DbInfo {
     pub schema_version: i64,
     pub applied_migrations: i64,
@@ -123,7 +197,9 @@ pub fn info(conn: &Connection) -> Result<DbInfo, DbError> {
         |row| row.get(0),
     )?;
     let applied_migrations: i64 =
-        conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))?;
+        conn.query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })?;
     let table_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
         [],
@@ -147,7 +223,11 @@ mod tests {
         let info = info(&conn).unwrap();
         assert_eq!(info.schema_version, MIGRATIONS.last().unwrap().0);
         assert_eq!(info.applied_migrations, MIGRATIONS.len() as i64);
-        assert!(info.table_count >= 15, "expected core tables, got {}", info.table_count);
+        assert!(
+            info.table_count >= 15,
+            "expected core tables, got {}",
+            info.table_count
+        );
     }
 
     #[test]
@@ -166,7 +246,9 @@ mod tests {
         let conn = open_in_memory().unwrap();
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM units WHERE is_system = 1", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM units WHERE is_system = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 14);
     }
@@ -205,5 +287,30 @@ mod tests {
             params![now],
         );
         assert!(dup.is_err(), "duplicate SKU must fail");
+    }
+
+    #[test]
+    fn business_creation_trims_fields_and_uses_configured_defaults() {
+        let conn = open_in_memory().unwrap();
+
+        let business = create_business(&conn, "  Kigali Hardware  ", Some("  TAX-123  ")).unwrap();
+
+        assert_eq!(business.name, "Kigali Hardware");
+        assert_eq!(business.tax_id.as_deref(), Some("TAX-123"));
+        assert_eq!(business.currency, "RWF");
+        assert_eq!(business.timezone, "Africa/Kigali");
+        assert_eq!(business.date_format, "DD/MM/YYYY");
+        assert_eq!(business.language, "en");
+        assert_eq!(list_businesses(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn business_creation_rejects_an_empty_name() {
+        let conn = open_in_memory().unwrap();
+
+        let result = create_business(&conn, "  ", None);
+
+        assert!(matches!(result, Err(DbError::InvalidInput(_))));
+        assert!(list_businesses(&conn).unwrap().is_empty());
     }
 }
