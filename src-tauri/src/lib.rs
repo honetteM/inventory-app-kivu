@@ -54,6 +54,29 @@ fn category_create(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn unit_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::Unit>, String> {
+    state
+        .with(|conn| db::list_units(conn, &business_id))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn unit_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    code: String,
+    name: String,
+    decimals_ok: bool,
+) -> Result<db::Unit, String> {
+    state
+        .with(|conn| db::create_unit(conn, &business_id, &code, &name, decimals_ok))
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -69,7 +92,9 @@ pub fn run() {
             business_list,
             business_create,
             category_list,
-            category_create
+            category_create,
+            unit_list,
+            unit_create
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

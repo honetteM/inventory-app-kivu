@@ -280,6 +280,98 @@ pub fn create_category(
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct Unit {
+    pub id: String,
+    pub business_id: Option<String>,
+    pub code: String,
+    pub name: String,
+    pub decimals_ok: bool,
+    pub is_system: bool,
+    pub is_active: bool,
+}
+
+pub fn list_units(conn: &Connection, business_id: &str) -> Result<Vec<Unit>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, business_id, code, name, decimals_ok, is_system, is_active
+         FROM units
+         WHERE business_id IS NULL OR business_id = ?1
+         ORDER BY is_system DESC, name",
+    )?;
+    let units = stmt
+        .query_map(params![business_id], |row| {
+            Ok(Unit {
+                id: row.get(0)?,
+                business_id: row.get(1)?,
+                code: row.get(2)?,
+                name: row.get(3)?,
+                decimals_ok: row.get::<_, i64>(4)? != 0,
+                is_system: row.get::<_, i64>(5)? != 0,
+                is_active: row.get::<_, i64>(6)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(units)
+}
+
+pub fn create_unit(
+    conn: &Connection,
+    business_id: &str,
+    code: &str,
+    name: &str,
+    decimals_ok: bool,
+) -> Result<Unit, DbError> {
+    let code = code.trim().to_ascii_lowercase();
+    let name = name.trim();
+    if code.is_empty() || name.is_empty() {
+        return Err(DbError::InvalidInput(
+            "unit code and name must not be empty".to_string(),
+        ));
+    }
+
+    let business_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM businesses WHERE id = ?1)",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    if !business_exists {
+        return Err(DbError::InvalidInput("business does not exist".to_string()));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    conn.execute(
+        "INSERT INTO units
+            (id, business_id, code, name, decimals_ok, is_system, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
+        params![
+            id,
+            business_id,
+            code,
+            name,
+            i64::from(decimals_ok),
+            timestamp
+        ],
+    )?;
+
+    Ok(conn.query_row(
+        "SELECT id, business_id, code, name, decimals_ok, is_system, is_active
+         FROM units WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(Unit {
+                id: row.get(0)?,
+                business_id: row.get(1)?,
+                code: row.get(2)?,
+                name: row.get(3)?,
+                decimals_ok: row.get::<_, i64>(4)? != 0,
+                is_system: row.get::<_, i64>(5)? != 0,
+                is_active: row.get::<_, i64>(6)? != 0,
+            })
+        },
+    )?)
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct DbInfo {
     pub schema_version: i64,
     pub applied_migrations: i64,
@@ -448,5 +540,57 @@ mod tests {
             Err(DbError::InvalidInput(_))
         ));
         assert!(list_categories(&conn, &business.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unit_list_includes_system_and_current_business_units_only() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        create_unit(&conn, &business.id, "box", "Box", false).unwrap();
+        create_unit(&conn, &other_business.id, "case", "Case", false).unwrap();
+
+        let units = list_units(&conn, &business.id).unwrap();
+
+        assert_eq!(units.len(), 15);
+        assert!(
+            units
+                .iter()
+                .any(|unit| unit.code == "bag" && unit.is_system)
+        );
+        assert!(
+            units
+                .iter()
+                .any(|unit| unit.code == "box" && !unit.is_system)
+        );
+        assert!(!units.iter().any(|unit| unit.code == "case"));
+    }
+
+    #[test]
+    fn custom_unit_normalizes_code_and_persists_decimal_setting() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+
+        let unit = create_unit(&conn, &business.id, "  BOX  ", "  Box  ", true).unwrap();
+
+        assert_eq!(unit.code, "box");
+        assert_eq!(unit.name, "Box");
+        assert!(unit.decimals_ok);
+        assert!(!unit.is_system);
+        assert_eq!(unit.business_id.as_deref(), Some(business.id.as_str()));
+    }
+
+    #[test]
+    fn custom_unit_rejects_empty_fields_and_duplicate_code() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        create_unit(&conn, &business.id, "box", "Box", false).unwrap();
+
+        assert!(matches!(
+            create_unit(&conn, &business.id, " ", "Box", false),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(create_unit(&conn, &business.id, "BOX", "Another box", false).is_err());
+        assert_eq!(list_units(&conn, &business.id).unwrap().len(), 15);
     }
 }
