@@ -77,6 +77,60 @@ fn unit_create(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn product_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    search: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<db::ProductPage, String> {
+    state
+        .with(|conn| db::list_products(conn, &business_id, search.as_deref(), offset, limit))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn product_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    category_id: Option<String>,
+    brand_id: Option<String>,
+    name: String,
+    sku: String,
+    barcode: Option<String>,
+    description: Option<String>,
+    size_dimensions: Option<String>,
+    colour: Option<String>,
+    base_unit_id: String,
+    purchase_price: i64,
+    selling_price: i64,
+    min_stock_quantity: i64,
+    vat_class: String,
+) -> Result<db::Product, String> {
+    state
+        .with(|conn| {
+            db::create_product(
+                conn,
+                &business_id,
+                category_id.as_deref(),
+                brand_id.as_deref(),
+                &name,
+                &sku,
+                barcode.as_deref(),
+                description.as_deref(),
+                size_dimensions.as_deref(),
+                colour.as_deref(),
+                &base_unit_id,
+                purchase_price,
+                selling_price,
+                min_stock_quantity,
+                &vat_class,
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -94,7 +148,9 @@ pub fn run() {
             category_list,
             category_create,
             unit_list,
-            unit_create
+            unit_create,
+            product_list,
+            product_create
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
