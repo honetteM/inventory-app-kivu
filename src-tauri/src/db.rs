@@ -15,6 +15,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "003_inventory",
         include_str!("../migrations/003_inventory.sql"),
     ),
+    (
+        4,
+        "004_inventory_costing",
+        include_str!("../migrations/004_inventory_costing.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -914,6 +919,8 @@ pub struct InventoryItem {
     pub sku: String,
     pub base_unit_name: String,
     pub quantity_on_hand: i64,
+    pub average_unit_cost: i64,
+    pub stock_value: i64,
     pub min_stock_quantity: i64,
     pub base_unit_allows_decimals: bool,
     pub has_movements: bool,
@@ -933,6 +940,7 @@ pub struct StockMovement {
     pub product_name: String,
     pub movement_type: String,
     pub quantity_delta: i64,
+    pub unit_cost: Option<i64>,
     pub previous_quantity: i64,
     pub new_quantity: i64,
     pub reference_type: Option<String>,
@@ -940,6 +948,18 @@ pub struct StockMovement {
     pub reason: Option<String>,
     pub user_id: Option<String>,
     pub created_at: String,
+}
+
+fn stock_value(quantity: i64, average_unit_cost: i64) -> Result<i64, DbError> {
+    let value = i128::from(quantity)
+        .checked_mul(i128::from(average_unit_cost))
+        .and_then(|amount| amount.checked_add(500))
+        .ok_or_else(|| {
+            DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+        })?
+        / 1000;
+    i64::try_from(value)
+        .map_err(|_| DbError::InvalidInput("stock valuation exceeds the supported limit".into()))
 }
 
 pub fn list_inventory(
@@ -986,7 +1006,8 @@ pub fn list_inventory(
     )?;
     let mut stmt = conn.prepare(
         "SELECT p.id, p.name, p.sku, u.name,
-                COALESCE(ib.quantity_on_hand, 0), p.min_stock_quantity, u.decimals_ok,
+                COALESCE(ib.quantity_on_hand, 0), COALESCE(ib.average_unit_cost, p.purchase_price),
+                p.min_stock_quantity, u.decimals_ok,
                 EXISTS(SELECT 1 FROM stock_movements sm WHERE sm.product_id = p.id)
          FROM products p
          JOIN units u ON u.id = p.base_unit_id
@@ -1006,20 +1027,27 @@ pub fn list_inventory(
          ORDER BY p.name COLLATE NOCASE, p.id
          LIMIT ?3 OFFSET ?4",
     )?;
-    let items = stmt
+    let mut items = stmt
         .query_map(params![business_id, pattern, limit, offset], |row| {
+            let quantity_on_hand: i64 = row.get(4)?;
+            let average_unit_cost: i64 = row.get(5)?;
             Ok(InventoryItem {
                 product_id: row.get(0)?,
                 name: row.get(1)?,
                 sku: row.get(2)?,
                 base_unit_name: row.get(3)?,
-                quantity_on_hand: row.get(4)?,
-                min_stock_quantity: row.get(5)?,
-                base_unit_allows_decimals: row.get::<_, i64>(6)? != 0,
-                has_movements: row.get(7)?,
+                quantity_on_hand,
+                average_unit_cost,
+                stock_value: 0,
+                min_stock_quantity: row.get(6)?,
+                base_unit_allows_decimals: row.get::<_, i64>(7)? != 0,
+                has_movements: row.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
+    for item in &mut items {
+        item.stock_value = stock_value(item.quantity_on_hand, item.average_unit_cost)?;
+    }
 
     Ok(InventoryPage { items, total_count })
 }
@@ -1040,7 +1068,7 @@ pub fn list_stock_movements(
 
     let mut stmt = conn.prepare(
         "SELECT sm.id, sm.business_id, sm.product_id, p.name, sm.movement_type,
-                sm.quantity_delta, sm.previous_quantity, sm.new_quantity,
+                sm.quantity_delta, sm.unit_cost, sm.previous_quantity, sm.new_quantity,
                 sm.reference_type, sm.reference_id, sm.reason, sm.user_id, sm.created_at
          FROM stock_movements sm
          JOIN products p ON p.id = sm.product_id
@@ -1057,13 +1085,14 @@ pub fn list_stock_movements(
                 product_name: row.get(3)?,
                 movement_type: row.get(4)?,
                 quantity_delta: row.get(5)?,
-                previous_quantity: row.get(6)?,
-                new_quantity: row.get(7)?,
-                reference_type: row.get(8)?,
-                reference_id: row.get(9)?,
-                reason: row.get(10)?,
-                user_id: row.get(11)?,
-                created_at: row.get(12)?,
+                unit_cost: row.get(6)?,
+                previous_quantity: row.get(7)?,
+                new_quantity: row.get(8)?,
+                reference_type: row.get(9)?,
+                reference_id: row.get(10)?,
+                reason: row.get(11)?,
+                user_id: row.get(12)?,
+                created_at: row.get(13)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -1084,16 +1113,16 @@ pub fn set_opening_stock(
     }
 
     let reason = reason.map(str::trim).filter(|value| !value.is_empty());
-    let product: Option<(String, i64)> = conn
+    let product: Option<(String, i64, i64)> = conn
         .query_row(
-            "SELECT p.name, u.decimals_ok FROM products p
+            "SELECT p.name, u.decimals_ok, p.purchase_price FROM products p
              JOIN units u ON u.id = p.base_unit_id
              WHERE p.id = ?1 AND p.business_id = ?2 AND p.is_active = 1",
             params![product_id, business_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let (product_name, base_unit_allows_decimals) = product.ok_or_else(|| {
+    let (product_name, base_unit_allows_decimals, unit_cost) = product.ok_or_else(|| {
         DbError::InvalidInput("active product does not belong to this business".to_string())
     })?;
     if base_unit_allows_decimals == 0 && quantity % 1000 != 0 {
@@ -1125,16 +1154,25 @@ pub fn set_opening_stock(
     }
 
     tx.execute(
-        "INSERT INTO inventory_balances (product_id, business_id, quantity_on_hand, updated_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![product_id, business_id, quantity, timestamp],
+        "INSERT INTO inventory_balances
+            (product_id, business_id, quantity_on_hand, average_unit_cost, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![product_id, business_id, quantity, unit_cost, timestamp],
     )?;
     tx.execute(
         "INSERT INTO stock_movements
-            (id, business_id, product_id, movement_type, quantity_delta,
+            (id, business_id, product_id, movement_type, quantity_delta, unit_cost,
              previous_quantity, new_quantity, reference_type, reference_id, reason, created_at)
-         VALUES (?1, ?2, ?3, 'opening_stock', ?4, 0, ?4, 'product', ?3, ?5, ?6)",
-        params![id, business_id, product_id, quantity, reason, timestamp],
+         VALUES (?1, ?2, ?3, 'opening_stock', ?4, ?5, 0, ?4, 'product', ?3, ?6, ?7)",
+        params![
+            id,
+            business_id,
+            product_id,
+            quantity,
+            unit_cost,
+            reason,
+            timestamp
+        ],
     )?;
     tx.commit()?;
 
@@ -1145,6 +1183,7 @@ pub fn set_opening_stock(
         product_name,
         movement_type: "opening_stock".to_string(),
         quantity_delta: quantity,
+        unit_cost: Some(unit_cost),
         previous_quantity: 0,
         new_quantity: quantity,
         reference_type: Some("product".to_string()),
@@ -1182,33 +1221,34 @@ pub fn correct_stock(
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = now_utc();
     let tx = conn.unchecked_transaction()?;
-    let product: Option<(String, i64)> = tx
+    let product: Option<(String, i64, i64)> = tx
         .query_row(
-            "SELECT p.name, u.decimals_ok FROM products p
+            "SELECT p.name, u.decimals_ok, p.purchase_price FROM products p
              JOIN units u ON u.id = p.base_unit_id
              WHERE p.id = ?1 AND p.business_id = ?2 AND p.is_active = 1",
             params![product_id, business_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let (product_name, base_unit_allows_decimals) = product.ok_or_else(|| {
-        DbError::InvalidInput("active product does not belong to this business".to_string())
-    })?;
+    let (product_name, base_unit_allows_decimals, product_unit_cost) =
+        product.ok_or_else(|| {
+            DbError::InvalidInput("active product does not belong to this business".to_string())
+        })?;
     if base_unit_allows_decimals == 0 && target_quantity % 1000 != 0 {
         return Err(DbError::InvalidInput(
             "corrected quantity must be a whole base unit".to_string(),
         ));
     }
 
-    let previous_quantity: i64 = tx
+    let existing_balance: Option<(i64, i64)> = tx
         .query_row(
-            "SELECT quantity_on_hand FROM inventory_balances
+            "SELECT quantity_on_hand, average_unit_cost FROM inventory_balances
              WHERE product_id = ?1 AND business_id = ?2",
             params![product_id, business_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()?
-        .unwrap_or(0);
+        .optional()?;
+    let (previous_quantity, average_unit_cost) = existing_balance.unwrap_or((0, product_unit_cost));
     if target_quantity == previous_quantity {
         return Err(DbError::InvalidInput(
             "corrected quantity must differ from the current stock".to_string(),
@@ -1217,23 +1257,32 @@ pub fn correct_stock(
     let quantity_delta = target_quantity - previous_quantity;
 
     tx.execute(
-        "INSERT INTO inventory_balances (product_id, business_id, quantity_on_hand, updated_at)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO inventory_balances
+            (product_id, business_id, quantity_on_hand, average_unit_cost, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(product_id) DO UPDATE SET
              quantity_on_hand = excluded.quantity_on_hand,
+             average_unit_cost = excluded.average_unit_cost,
              updated_at = excluded.updated_at",
-        params![product_id, business_id, target_quantity, timestamp],
+        params![
+            product_id,
+            business_id,
+            target_quantity,
+            average_unit_cost,
+            timestamp
+        ],
     )?;
     tx.execute(
         "INSERT INTO stock_movements
-            (id, business_id, product_id, movement_type, quantity_delta,
+            (id, business_id, product_id, movement_type, quantity_delta, unit_cost,
              previous_quantity, new_quantity, reference_type, reference_id, reason, created_at)
-         VALUES (?1, ?2, ?3, 'stock_correction', ?4, ?5, ?6, 'product', ?3, ?7, ?8)",
+         VALUES (?1, ?2, ?3, 'stock_correction', ?4, ?5, ?6, ?7, 'product', ?3, ?8, ?9)",
         params![
             id,
             business_id,
             product_id,
             quantity_delta,
+            average_unit_cost,
             previous_quantity,
             target_quantity,
             reason,
@@ -1249,6 +1298,7 @@ pub fn correct_stock(
         product_name,
         movement_type: "stock_correction".to_string(),
         quantity_delta,
+        unit_cost: Some(average_unit_cost),
         previous_quantity,
         new_quantity: target_quantity,
         reference_type: Some("product".to_string()),
@@ -1264,12 +1314,18 @@ pub fn receive_stock(
     business_id: &str,
     product_id: &str,
     quantity: i64,
+    received_unit_cost: i64,
     receipt_reference: &str,
     reason: Option<&str>,
 ) -> Result<StockMovement, DbError> {
     if quantity <= 0 {
         return Err(DbError::InvalidInput(
             "received quantity must be greater than zero".to_string(),
+        ));
+    }
+    if received_unit_cost < 0 {
+        return Err(DbError::InvalidInput(
+            "received unit cost must not be negative".to_string(),
         ));
     }
     let receipt_reference = receipt_reference.trim();
@@ -1307,38 +1363,74 @@ pub fn receive_stock(
         ));
     }
 
-    let previous_quantity: i64 = tx
+    let existing_balance: Option<(i64, i64)> = tx
         .query_row(
-            "SELECT quantity_on_hand FROM inventory_balances
+            "SELECT quantity_on_hand, average_unit_cost FROM inventory_balances
              WHERE product_id = ?1 AND business_id = ?2",
             params![product_id, business_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()?
-        .unwrap_or(0);
+        .optional()?;
+    let (previous_quantity, previous_average_unit_cost) =
+        existing_balance.unwrap_or((0, received_unit_cost));
     let new_quantity = previous_quantity.checked_add(quantity).ok_or_else(|| {
         DbError::InvalidInput("received quantity exceeds the supported stock limit".to_string())
     })?;
+    let average_unit_cost = if previous_quantity == 0 {
+        received_unit_cost
+    } else {
+        let previous_value = i128::from(previous_quantity)
+            .checked_mul(i128::from(previous_average_unit_cost))
+            .ok_or_else(|| {
+                DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+            })?;
+        let received_value = i128::from(quantity)
+            .checked_mul(i128::from(received_unit_cost))
+            .ok_or_else(|| {
+                DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+            })?;
+        let weighted_value = previous_value.checked_add(received_value).ok_or_else(|| {
+            DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+        })?;
+        let average = weighted_value
+            .checked_add(i128::from(new_quantity / 2))
+            .ok_or_else(|| {
+                DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+            })?
+            / i128::from(new_quantity);
+        i64::try_from(average).map_err(|_| {
+            DbError::InvalidInput("average unit cost exceeds the supported limit".into())
+        })?
+    };
 
     tx.execute(
-        "INSERT INTO inventory_balances (product_id, business_id, quantity_on_hand, updated_at)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO inventory_balances
+            (product_id, business_id, quantity_on_hand, average_unit_cost, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(product_id) DO UPDATE SET
              quantity_on_hand = excluded.quantity_on_hand,
+             average_unit_cost = excluded.average_unit_cost,
              updated_at = excluded.updated_at",
-        params![product_id, business_id, new_quantity, timestamp],
+        params![
+            product_id,
+            business_id,
+            new_quantity,
+            average_unit_cost,
+            timestamp
+        ],
     )?;
     tx.execute(
         "INSERT INTO stock_movements
-            (id, business_id, product_id, movement_type, quantity_delta,
+            (id, business_id, product_id, movement_type, quantity_delta, unit_cost,
              previous_quantity, new_quantity, reference_type, reference_id, reason, created_at)
-         VALUES (?1, ?2, ?3, 'purchase_received', ?4, ?5, ?6,
-                 'supplier_document', ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, 'purchase_received', ?4, ?5, ?6, ?7,
+                 'supplier_document', ?8, ?9, ?10)",
         params![
             id,
             business_id,
             product_id,
             quantity,
+            received_unit_cost,
             previous_quantity,
             new_quantity,
             receipt_reference,
@@ -1355,6 +1447,7 @@ pub fn receive_stock(
         product_name,
         movement_type: "purchase_received".to_string(),
         quantity_delta: quantity,
+        unit_cost: Some(received_unit_cost),
         previous_quantity,
         new_quantity,
         reference_type: Some("supplier_document".to_string()),
@@ -1442,6 +1535,60 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn inventory_costing_migration_backfills_existing_stock_costs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pragmas(&conn).unwrap();
+        applied_versions(&conn).unwrap();
+        for (version, name, sql) in MIGRATIONS.iter().take(3) {
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at)
+                 VALUES (?1, ?2, ?3)",
+                params![version, name, now_utc()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "COST-MIGRATION-01");
+        conn.execute(
+            "INSERT INTO inventory_balances (product_id, business_id, quantity_on_hand, updated_at)
+             VALUES (?1, ?2, 2_000, ?3)",
+            params![product.id, business.id, now_utc()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO stock_movements
+                (id, business_id, product_id, movement_type, quantity_delta,
+                 previous_quantity, new_quantity, created_at)
+             VALUES ('legacy-movement', ?1, ?2, 'opening_stock', 2_000, 0, 2_000, ?3)",
+            params![business.id, product.id, now_utc()],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        let balance_cost: i64 = conn
+            .query_row(
+                "SELECT average_unit_cost FROM inventory_balances WHERE product_id = ?1",
+                params![product.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let movement_cost: i64 = conn
+            .query_row(
+                "SELECT unit_cost FROM stock_movements WHERE id = 'legacy-movement'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(balance_cost, product.purchase_price);
+        assert_eq!(movement_cost, product.purchase_price);
     }
 
     #[test]
@@ -2007,6 +2154,8 @@ mod tests {
         assert_eq!(movement.reason.as_deref(), Some("Initial stock count"));
         assert_eq!(inventory.total_count, 1);
         assert_eq!(inventory.items[0].quantity_on_hand, 125_000);
+        assert_eq!(inventory.items[0].average_unit_cost, 10_000);
+        assert_eq!(inventory.items[0].stock_value, 1_250_000);
         assert_eq!(inventory.items[0].min_stock_quantity, 5_000);
         assert!(!inventory.items[0].base_unit_allows_decimals);
         assert!(inventory.items[0].has_movements);
@@ -2108,6 +2257,8 @@ mod tests {
         assert_eq!(correction.previous_quantity, 8_000);
         assert_eq!(correction.new_quantity, 6_000);
         assert_eq!(inventory.items[0].quantity_on_hand, 6_000);
+        assert_eq!(inventory.items[0].average_unit_cost, 10_000);
+        assert_eq!(inventory.items[0].stock_value, 60_000);
         assert_eq!(movements.len(), 2);
         assert!(
             movements
@@ -2163,6 +2314,7 @@ mod tests {
             &business.id,
             &product.id,
             3_000,
+            20_000,
             "  INV-2026-0042  ",
             Some("  Partial delivery  "),
         )
@@ -2174,12 +2326,15 @@ mod tests {
 
         assert_eq!(receipt.movement_type, "purchase_received");
         assert_eq!(receipt.quantity_delta, 3_000);
+        assert_eq!(receipt.unit_cost, Some(20_000));
         assert_eq!(receipt.previous_quantity, 5_000);
         assert_eq!(receipt.new_quantity, 8_000);
         assert_eq!(receipt.reference_type.as_deref(), Some("supplier_document"));
         assert_eq!(receipt.reference_id.as_deref(), Some("INV-2026-0042"));
         assert_eq!(receipt.reason.as_deref(), Some("Partial delivery"));
         assert_eq!(inventory.items[0].quantity_on_hand, 8_000);
+        assert_eq!(inventory.items[0].average_unit_cost, 13_750);
+        assert_eq!(inventory.items[0].stock_value, 110_000);
         assert_eq!(movements.len(), 2);
         assert!(movements.iter().any(|movement| movement.id == opening.id));
         assert!(movements.iter().any(|movement| movement.id == receipt.id));
@@ -2210,18 +2365,27 @@ mod tests {
         .unwrap();
 
         let initial_receipt =
-            receive_stock(&conn, &business.id, &bags.id, 2_000, "DEL-01", None).unwrap();
+            receive_stock(&conn, &business.id, &bags.id, 2_000, 12_000, "DEL-01", None).unwrap();
         assert_eq!(initial_receipt.previous_quantity, 0);
         assert_eq!(initial_receipt.new_quantity, 2_000);
+        assert_eq!(initial_receipt.unit_cost, Some(12_000));
         assert!(matches!(
             set_opening_stock(&conn, &business.id, &bags.id, 1_000, None),
             Err(DbError::InvalidInput(_))
         ));
-        let decimal_receipt =
-            receive_stock(&conn, &business.id, &cable.id, 1_500, "DEL-02", None).unwrap();
+        let decimal_receipt = receive_stock(
+            &conn,
+            &business.id,
+            &cable.id,
+            1_500,
+            15_000,
+            "DEL-02",
+            None,
+        )
+        .unwrap();
         assert_eq!(decimal_receipt.new_quantity, 1_500);
         assert!(matches!(
-            receive_stock(&conn, &business.id, &bags.id, 1_500, "DEL-03", None),
+            receive_stock(&conn, &business.id, &bags.id, 1_500, 12_000, "DEL-03", None),
             Err(DbError::InvalidInput(_))
         ));
     }
@@ -2234,15 +2398,27 @@ mod tests {
         let product = create_test_product(&conn, &business.id, "STOCK-RECEIPT-02");
 
         assert!(matches!(
-            receive_stock(&conn, &business.id, &product.id, 0, "DEL-01", None),
+            receive_stock(&conn, &business.id, &product.id, 0, 10_000, "DEL-01", None),
             Err(DbError::InvalidInput(_))
         ));
         assert!(matches!(
-            receive_stock(&conn, &business.id, &product.id, -1_000, "DEL-01", None),
+            receive_stock(
+                &conn,
+                &business.id,
+                &product.id,
+                -1_000,
+                10_000,
+                "DEL-01",
+                None
+            ),
             Err(DbError::InvalidInput(_))
         ));
         assert!(matches!(
-            receive_stock(&conn, &business.id, &product.id, 1_000, "   ", None),
+            receive_stock(&conn, &business.id, &product.id, 1_000, -1, "DEL-01", None),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            receive_stock(&conn, &business.id, &product.id, 1_000, 10_000, "   ", None),
             Err(DbError::InvalidInput(_))
         ));
         assert!(matches!(
@@ -2251,6 +2427,7 @@ mod tests {
                 &business.id,
                 &product.id,
                 1_000,
+                10_000,
                 &"x".repeat(201),
                 None
             ),
@@ -2262,6 +2439,7 @@ mod tests {
                 &business.id,
                 &product.id,
                 1_000,
+                10_000,
                 "DEL-01",
                 Some(&"x".repeat(501))
             ),
@@ -2273,6 +2451,7 @@ mod tests {
                 &other_business.id,
                 &product.id,
                 1_000,
+                10_000,
                 "DEL-01",
                 None
             ),
@@ -2291,7 +2470,15 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            receive_stock(&conn, &business.id, &product.id, 1_000, "DEL-02", None),
+            receive_stock(
+                &conn,
+                &business.id,
+                &product.id,
+                1_000,
+                10_000,
+                "DEL-02",
+                None
+            ),
             Err(DbError::InvalidInput(_))
         ));
         let balance: i64 = conn

@@ -20,6 +20,7 @@ import {
 const PAGE_SIZE = 20;
 const MOVEMENT_PAGE_SIZE = 20;
 const QUANTITY_SCALE = 1000n;
+const MONEY_SCALE = 100n;
 const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
 
 interface Business {
@@ -33,6 +34,8 @@ interface InventoryItem {
   sku: string;
   base_unit_name: string;
   quantity_on_hand: number;
+  average_unit_cost: number;
+  stock_value: number;
   min_stock_quantity: number;
   base_unit_allows_decimals: boolean;
   has_movements: boolean;
@@ -49,6 +52,7 @@ interface StockMovement {
   product_name: string;
   movement_type: string;
   quantity_delta: number;
+  unit_cost: number | null;
   previous_quantity: number;
   new_quantity: number;
   reference_type: string | null;
@@ -88,6 +92,29 @@ function toScaledQuantity(value: string, allowsDecimals: boolean): number {
   return Number(scaled);
 }
 
+function toScaledMoney(value: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new Error("Unit cost must be a whole non-negative RWF amount.");
+  }
+  const scaled = BigInt(value) * MONEY_SCALE;
+  if (scaled > MAX_SAFE_INTEGER) {
+    throw new Error("Unit cost is too large.");
+  }
+  return Number(scaled);
+}
+
+function formatMoney(scaledAmount: number): string {
+  if (!Number.isSafeInteger(scaledAmount)) {
+    return "Invalid amount";
+  }
+  const amount = BigInt(scaledAmount);
+  const whole = amount / MONEY_SCALE;
+  const fraction = amount % MONEY_SCALE;
+  return `${new Intl.NumberFormat("en-RW").format(whole)}${
+    fraction === 0n ? "" : `.${fraction.toString().padStart(2, "0")}`
+  } RWF`;
+}
+
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
@@ -113,6 +140,7 @@ export function InventoryPage() {
   const [correctedQuantity, setCorrectedQuantity] = useState("");
   const [correctionReason, setCorrectionReason] = useState("");
   const [receivedQuantity, setReceivedQuantity] = useState("");
+  const [receivedUnitCost, setReceivedUnitCost] = useState("");
   const [receiptReference, setReceiptReference] = useState("");
   const [receiptNotes, setReceiptNotes] = useState("");
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
@@ -196,15 +224,16 @@ export function InventoryPage() {
   }, [businessId, expandedProductId, page, search]);
 
   useEffect(() => {
+    setOpeningQuantity("");
+    setOpeningReason("");
+    setCorrectedQuantity("");
+    setCorrectionReason("");
+    setReceivedQuantity("");
+    setReceivedUnitCost("");
+    setReceiptReference("");
+    setReceiptNotes("");
     if (!businessId || !expandedProductId) {
       setMovements([]);
-      setOpeningQuantity("");
-      setOpeningReason("");
-      setCorrectedQuantity("");
-      setCorrectionReason("");
-      setReceivedQuantity("");
-      setReceiptReference("");
-      setReceiptNotes("");
       return;
     }
 
@@ -333,10 +362,12 @@ export function InventoryPage() {
         businessId,
         productId: selectedProduct.product_id,
         quantity: toScaledQuantity(receivedQuantity, selectedProduct.base_unit_allows_decimals),
+        receivedUnitCost: toScaledMoney(receivedUnitCost),
         receiptReference: receiptReference.trim(),
         reason: receiptNotes.trim() || null,
       });
       setReceivedQuantity("");
+      setReceivedUnitCost("");
       setReceiptReference("");
       setReceiptNotes("");
       const result = await invoke<InventoryPageData>("inventory_list", {
@@ -368,7 +399,7 @@ export function InventoryPage() {
           <p className="text-sm font-medium text-muted-foreground">Stock control</p>
           <h1 className="text-3xl font-semibold tracking-tight">Inventory</h1>
           <p className="mt-2 text-muted-foreground">
-            Record opening quantities, receive deliveries, correct counted stock, and review movements.
+            Record opening quantities, receive deliveries, correct counted stock, and review stock value.
           </p>
         </div>
         {businesses.length > 0 ? (
@@ -416,7 +447,7 @@ export function InventoryPage() {
           <CardHeader>
             <CardTitle>Stock balances</CardTitle>
             <CardDescription>
-              {totalCount.toLocaleString("en-RW")} active products · opening quantities use base units
+              {totalCount.toLocaleString("en-RW")} active products · stock value uses weighted-average purchase cost
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -454,6 +485,8 @@ export function InventoryPage() {
                     <TableHead>SKU</TableHead>
                     <TableHead>Base unit</TableHead>
                     <TableHead className="text-right">On hand</TableHead>
+                    <TableHead className="text-right">Avg. unit cost</TableHead>
+                    <TableHead className="text-right">Stock value</TableHead>
                     <TableHead className="text-right">Minimum</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Actions</TableHead>
@@ -470,6 +503,8 @@ export function InventoryPage() {
                           <TableCell>{item.sku}</TableCell>
                           <TableCell>{item.base_unit_name}</TableCell>
                           <TableCell className="text-right">{formatQuantity(item.quantity_on_hand)}</TableCell>
+                          <TableCell className="text-right">{formatMoney(item.average_unit_cost)}</TableCell>
+                          <TableCell className="text-right">{formatMoney(item.stock_value)}</TableCell>
                           <TableCell className="text-right">{formatQuantity(item.min_stock_quantity)}</TableCell>
                           <TableCell>
                             <Badge variant={isLowStock ? "destructive" : "secondary"}>
@@ -491,7 +526,7 @@ export function InventoryPage() {
                         </TableRow>
                         {isExpanded ? (
                           <TableRow key={`${item.product_id}-details`}>
-                            <TableCell colSpan={7} className="bg-muted/20">
+                            <TableCell colSpan={9} className="bg-muted/20">
                               <div className="space-y-5 p-2">
                                 {!item.has_movements ? (
                                   <form className="grid gap-3 rounded-lg border bg-background p-4 md:grid-cols-[1fr_1fr_auto]" onSubmit={handleOpeningStock}>
@@ -529,9 +564,15 @@ export function InventoryPage() {
                                     Opening stock can only be recorded before the first stock movement.
                                   </p>
                                 )}
+                                {!item.has_movements ? (
+                                  <p className="text-xs text-muted-foreground">
+                                    Opening stock valuation starts from the product&apos;s saved purchase price of{" "}
+                                    {formatMoney(item.average_unit_cost)} per {item.base_unit_name}.
+                                  </p>
+                                ) : null}
 
                                 <form
-                                  className="grid gap-3 rounded-lg border bg-background p-4 md:grid-cols-[1fr_1fr_1fr_auto]"
+                                  className="grid gap-3 rounded-lg border bg-background p-4 md:grid-cols-[1fr_1fr_1.5fr_1fr_auto]"
                                   onSubmit={handleStockReceipt}
                                 >
                                   <div className="space-y-2">
@@ -546,6 +587,21 @@ export function InventoryPage() {
                                       required
                                       value={receivedQuantity}
                                       onChange={(event) => setReceivedQuantity(event.target.value)}
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
+                                    <Label htmlFor={`receipt-unit-cost-${item.product_id}`}>
+                                      Cost per base unit (RWF)
+                                    </Label>
+                                    <Input
+                                      id={`receipt-unit-cost-${item.product_id}`}
+                                      type="number"
+                                      min="0"
+                                      step="1"
+                                      required
+                                      value={receivedUnitCost}
+                                      onChange={(event) => setReceivedUnitCost(event.target.value)}
+                                      placeholder="Cost for one base unit"
                                     />
                                   </div>
                                   <div className="space-y-2">
@@ -574,7 +630,7 @@ export function InventoryPage() {
                                   <Button
                                     type="submit"
                                     className="self-end"
-                                    disabled={isSaving || !receivedQuantity || !receiptReference.trim()}
+                                    disabled={isSaving || !receivedQuantity || !receivedUnitCost || !receiptReference.trim()}
                                   >
                                     {isSaving ? <LoaderCircle className="animate-spin" /> : <Warehouse />}
                                     Receive stock
@@ -639,6 +695,7 @@ export function InventoryPage() {
                                               {movement.reason ?? movement.reference_id ?? "No reason recorded"}
                                               {" · "}
                                               {new Date(movement.created_at).toLocaleString()}
+                                              {movement.unit_cost !== null ? ` · ${formatMoney(movement.unit_cost)}/${selectedProduct?.base_unit_name ?? "unit"}` : ""}
                                             </p>
                                           </div>
                                           <p className="text-right">

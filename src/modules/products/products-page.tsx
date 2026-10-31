@@ -546,11 +546,11 @@ export function ProductsPage() {
                     </select>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="product-purchase-price">Purchase price (RWF)</Label>
+                    <Label htmlFor="product-purchase-price">Purchase price per base unit (RWF)</Label>
                     <Input id="product-purchase-price" type="number" min="0" step="1" maxLength={12} required value={purchasePrice} onChange={(event) => setPurchasePrice(event.target.value)} />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="product-selling-price">Selling price (RWF)</Label>
+                    <Label htmlFor="product-selling-price">Selling price per base unit (RWF)</Label>
                     <Input id="product-selling-price" type="number" min="0" step="1" maxLength={12} required value={sellingPrice} onChange={(event) => setSellingPrice(event.target.value)} />
                   </div>
                   <div className="space-y-2">

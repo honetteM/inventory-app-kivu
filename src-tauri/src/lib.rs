@@ -248,6 +248,7 @@ fn inventory_receive_stock(
     business_id: String,
     product_id: String,
     quantity: i64,
+    received_unit_cost: i64,
     receipt_reference: String,
     reason: Option<String>,
 ) -> Result<db::StockMovement, String> {
@@ -258,6 +259,7 @@ fn inventory_receive_stock(
                 &business_id,
                 &product_id,
                 quantity,
+                received_unit_cost,
                 &receipt_reference,
                 reason.as_deref(),
             )
