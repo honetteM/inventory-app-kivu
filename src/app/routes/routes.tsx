@@ -2,6 +2,7 @@ import { createBrowserRouter } from "react-router-dom";
 import { AppLayout } from "../layouts/app-layout";
 import { PagePlaceholder } from "@/components/shared/page-placeholder";
 import { DashboardPage } from "@/modules/dashboard/dashboard-page";
+import { ProductsPage } from "@/modules/products/products-page";
 import { BusinessSetupPage } from "@/modules/settings/business-setup-page";
 
 const placeholder = (title: string, description: string) => (
@@ -15,7 +16,7 @@ export const router = createBrowserRouter([
     children: [
       { index: true, element: <DashboardPage /> },
       { path: "pos", element: placeholder("Point of Sale", "Fast checkout for walk-in customers.") },
-      { path: "products", element: placeholder("Products", "Product catalogue with units, prices and categories.") },
+      { path: "products", element: <ProductsPage /> },
       { path: "inventory", element: placeholder("Inventory", "Stock ledger, adjustments and low-stock alerts.") },
       { path: "purchases", element: placeholder("Purchases", "Supplier invoices and stock receiving.") },
       { path: "sales", element: placeholder("Sales History", "Completed transactions and returns.") },
