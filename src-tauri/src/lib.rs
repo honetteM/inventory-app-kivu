@@ -186,6 +186,49 @@ fn product_unit_create(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn inventory_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    search: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<db::InventoryPage, String> {
+    state
+        .with(|conn| db::list_inventory(conn, &business_id, search.as_deref(), offset, limit))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn stock_movement_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    product_id: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<db::StockMovement>, String> {
+    state
+        .with(|conn| {
+            db::list_stock_movements(conn, &business_id, product_id.as_deref(), offset, limit)
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn inventory_set_opening_stock(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    product_id: String,
+    quantity: i64,
+    reason: Option<String>,
+) -> Result<db::StockMovement, String> {
+    state
+        .with(|conn| {
+            db::set_opening_stock(conn, &business_id, &product_id, quantity, reason.as_deref())
+        })
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -210,8 +253,9 @@ pub fn run() {
             product_create,
             product_unit_list,
             product_unit_create,
-            product_unit_list,
-            product_unit_create
+            inventory_list,
+            stock_movement_list,
+            inventory_set_opening_stock
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

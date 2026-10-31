@@ -10,6 +10,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "002_products",
         include_str!("../migrations/002_products.sql"),
     ),
+    (
+        3,
+        "003_inventory",
+        include_str!("../migrations/003_inventory.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -903,6 +908,243 @@ pub fn create_product_unit(
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct InventoryItem {
+    pub product_id: String,
+    pub name: String,
+    pub sku: String,
+    pub base_unit_name: String,
+    pub quantity_on_hand: i64,
+    pub min_stock_quantity: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct InventoryPage {
+    pub items: Vec<InventoryItem>,
+    pub total_count: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct StockMovement {
+    pub id: String,
+    pub business_id: String,
+    pub product_id: String,
+    pub product_name: String,
+    pub movement_type: String,
+    pub quantity_delta: i64,
+    pub previous_quantity: i64,
+    pub new_quantity: i64,
+    pub reference_type: Option<String>,
+    pub reference_id: Option<String>,
+    pub reason: Option<String>,
+    pub user_id: Option<String>,
+    pub created_at: String,
+}
+
+pub fn list_inventory(
+    conn: &Connection,
+    business_id: &str,
+    search: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> Result<InventoryPage, DbError> {
+    if offset < 0 || !(1..=100).contains(&limit) {
+        return Err(DbError::InvalidInput(
+            "inventory page requires a non-negative offset and a limit between 1 and 100"
+                .to_string(),
+        ));
+    }
+
+    let search = search.map(str::trim).filter(|value| !value.is_empty());
+    let pattern = search.map(|value| {
+        format!(
+            "%{}%",
+            value
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        )
+    });
+    let total_count: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM products p
+         LEFT JOIN categories c ON c.id = p.category_id
+         LEFT JOIN brands b ON b.id = p.brand_id
+         JOIN units u ON u.id = p.base_unit_id
+         WHERE p.business_id = ?1
+           AND p.is_active = 1
+           AND (?2 IS NULL OR
+                p.name LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+                p.sku LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+                COALESCE(p.barcode, '') LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+                COALESCE(b.name, '') LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+                COALESCE(c.name, '') LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+                u.name LIKE ?2 ESCAPE '\\' COLLATE NOCASE)",
+        params![business_id, pattern],
+        |row| row.get(0),
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.name, p.sku, u.name,
+                COALESCE(ib.quantity_on_hand, 0), p.min_stock_quantity
+         FROM products p
+         JOIN units u ON u.id = p.base_unit_id
+         LEFT JOIN inventory_balances ib
+           ON ib.product_id = p.id AND ib.business_id = p.business_id
+         LEFT JOIN categories c ON c.id = p.category_id
+         LEFT JOIN brands b ON b.id = p.brand_id
+         WHERE p.business_id = ?1
+           AND p.is_active = 1
+           AND (?2 IS NULL OR
+                p.name LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+                p.sku LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+                COALESCE(p.barcode, '') LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+                COALESCE(b.name, '') LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+                COALESCE(c.name, '') LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+                u.name LIKE ?2 ESCAPE '\\' COLLATE NOCASE)
+         ORDER BY p.name COLLATE NOCASE, p.id
+         LIMIT ?3 OFFSET ?4",
+    )?;
+    let items = stmt
+        .query_map(params![business_id, pattern, limit, offset], |row| {
+            Ok(InventoryItem {
+                product_id: row.get(0)?,
+                name: row.get(1)?,
+                sku: row.get(2)?,
+                base_unit_name: row.get(3)?,
+                quantity_on_hand: row.get(4)?,
+                min_stock_quantity: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(InventoryPage { items, total_count })
+}
+
+pub fn list_stock_movements(
+    conn: &Connection,
+    business_id: &str,
+    product_id: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<StockMovement>, DbError> {
+    if offset < 0 || !(1..=100).contains(&limit) {
+        return Err(DbError::InvalidInput(
+            "movement page requires a non-negative offset and a limit between 1 and 100"
+                .to_string(),
+        ));
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT sm.id, sm.business_id, sm.product_id, p.name, sm.movement_type,
+                sm.quantity_delta, sm.previous_quantity, sm.new_quantity,
+                sm.reference_type, sm.reference_id, sm.reason, sm.user_id, sm.created_at
+         FROM stock_movements sm
+         JOIN products p ON p.id = sm.product_id
+         WHERE sm.business_id = ?1 AND (?2 IS NULL OR sm.product_id = ?2)
+         ORDER BY sm.created_at DESC, sm.id DESC
+         LIMIT ?3 OFFSET ?4",
+    )?;
+    let movements = stmt
+        .query_map(params![business_id, product_id, limit, offset], |row| {
+            Ok(StockMovement {
+                id: row.get(0)?,
+                business_id: row.get(1)?,
+                product_id: row.get(2)?,
+                product_name: row.get(3)?,
+                movement_type: row.get(4)?,
+                quantity_delta: row.get(5)?,
+                previous_quantity: row.get(6)?,
+                new_quantity: row.get(7)?,
+                reference_type: row.get(8)?,
+                reference_id: row.get(9)?,
+                reason: row.get(10)?,
+                user_id: row.get(11)?,
+                created_at: row.get(12)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(movements)
+}
+
+pub fn set_opening_stock(
+    conn: &Connection,
+    business_id: &str,
+    product_id: &str,
+    quantity: i64,
+    reason: Option<&str>,
+) -> Result<StockMovement, DbError> {
+    if quantity < 0 {
+        return Err(DbError::InvalidInput(
+            "opening quantity must not be negative".to_string(),
+        ));
+    }
+
+    let reason = reason.map(str::trim).filter(|value| !value.is_empty());
+    let product_name: Option<String> = conn
+        .query_row(
+            "SELECT name FROM products
+             WHERE id = ?1 AND business_id = ?2 AND is_active = 1",
+            params![product_id, business_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let product_name = product_name.ok_or_else(|| {
+        DbError::InvalidInput("active product does not belong to this business".to_string())
+    })?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    let existing_balance: Option<i64> = tx
+        .query_row(
+            "SELECT quantity_on_hand FROM inventory_balances
+             WHERE product_id = ?1 AND business_id = ?2",
+            params![product_id, business_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let has_movement: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM stock_movements WHERE product_id = ?1)",
+        params![product_id],
+        |row| row.get(0),
+    )?;
+    if existing_balance.unwrap_or(0) != 0 || has_movement {
+        return Err(DbError::InvalidInput(
+            "opening stock can only be recorded once, before other stock movements".to_string(),
+        ));
+    }
+
+    tx.execute(
+        "INSERT INTO inventory_balances (product_id, business_id, quantity_on_hand, updated_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![product_id, business_id, quantity, timestamp],
+    )?;
+    tx.execute(
+        "INSERT INTO stock_movements
+            (id, business_id, product_id, movement_type, quantity_delta,
+             previous_quantity, new_quantity, reference_type, reference_id, reason, created_at)
+         VALUES (?1, ?2, ?3, 'opening_stock', ?4, 0, ?4, 'product', ?3, ?5, ?6)",
+        params![id, business_id, product_id, quantity, reason, timestamp],
+    )?;
+    tx.commit()?;
+
+    Ok(StockMovement {
+        id,
+        business_id: business_id.to_string(),
+        product_id: product_id.to_string(),
+        product_name,
+        movement_type: "opening_stock".to_string(),
+        quantity_delta: quantity,
+        previous_quantity: 0,
+        new_quantity: quantity,
+        reference_type: Some("product".to_string()),
+        reference_id: Some(product_id.to_string()),
+        reason: reason.map(str::to_string),
+        user_id: None,
+        created_at: timestamp,
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct DbInfo {
     pub schema_version: i64,
     pub applied_migrations: i64,
@@ -934,6 +1176,27 @@ pub fn info(conn: &Connection) -> Result<DbInfo, DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn create_test_product(conn: &Connection, business_id: &str, sku: &str) -> Product {
+        create_product(
+            conn,
+            business_id,
+            None,
+            None,
+            "Test product",
+            sku,
+            None,
+            None,
+            None,
+            None,
+            "sys-unit-bag",
+            10_000,
+            12_000,
+            5_000,
+            "standard",
+        )
+        .unwrap()
+    }
 
     #[test]
     fn migrations_apply_on_fresh_database() {
@@ -1496,5 +1759,115 @@ mod tests {
 
         assert_eq!(product_unit.conversion_factor, 1_500);
         assert_eq!(product_unit.selling_price, None);
+    }
+
+    #[test]
+    fn opening_stock_updates_balance_and_writes_traceable_movement() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "STOCK-01");
+
+        let movement = set_opening_stock(
+            &conn,
+            &business.id,
+            &product.id,
+            125_000,
+            Some("  Initial stock count  "),
+        )
+        .unwrap();
+        let inventory = list_inventory(&conn, &business.id, Some("STOCK-01"), 0, 20).unwrap();
+        let movements =
+            list_stock_movements(&conn, &business.id, Some(&product.id), 0, 20).unwrap();
+
+        assert_eq!(movement.movement_type, "opening_stock");
+        assert_eq!(movement.previous_quantity, 0);
+        assert_eq!(movement.new_quantity, 125_000);
+        assert_eq!(movement.quantity_delta, 125_000);
+        assert_eq!(movement.reason.as_deref(), Some("Initial stock count"));
+        assert_eq!(inventory.total_count, 1);
+        assert_eq!(inventory.items[0].quantity_on_hand, 125_000);
+        assert_eq!(inventory.items[0].min_stock_quantity, 5_000);
+        assert_eq!(movements.len(), 1);
+        assert_eq!(movements[0].id, movement.id);
+        assert_eq!(
+            movements[0].reference_id.as_deref(),
+            Some(product.id.as_str())
+        );
+    }
+
+    #[test]
+    fn opening_stock_rejects_negative_repeat_and_cross_business_entries() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "STOCK-02");
+
+        assert!(matches!(
+            set_opening_stock(&conn, &business.id, &product.id, -1, None),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            set_opening_stock(&conn, &other_business.id, &product.id, 1000, None),
+            Err(DbError::InvalidInput(_))
+        ));
+        set_opening_stock(&conn, &business.id, &product.id, 0, None).unwrap();
+        assert!(matches!(
+            set_opening_stock(&conn, &business.id, &product.id, 1000, None),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert_eq!(
+            list_stock_movements(&conn, &business.id, Some(&product.id), 0, 20)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn inventory_search_and_movement_history_are_business_scoped_and_paginated() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let first = create_test_product(&conn, &business.id, "STOCK-03");
+        let second = create_test_product(&conn, &business.id, "STOCK-04");
+        let foreign = create_test_product(&conn, &other_business.id, "STOCK-05");
+        set_opening_stock(&conn, &business.id, &first.id, 10_000, None).unwrap();
+        set_opening_stock(&conn, &business.id, &second.id, 20_000, None).unwrap();
+        set_opening_stock(&conn, &other_business.id, &foreign.id, 30_000, None).unwrap();
+
+        let inventory = list_inventory(&conn, &business.id, Some("STOCK"), 1, 1).unwrap();
+        let movements = list_stock_movements(&conn, &business.id, None, 0, 1).unwrap();
+        let no_cross_business_movements =
+            list_stock_movements(&conn, &business.id, Some(&foreign.id), 0, 10).unwrap();
+
+        assert_eq!(inventory.total_count, 2);
+        assert_eq!(inventory.items.len(), 1);
+        assert_eq!(movements.len(), 1);
+        assert_ne!(movements[0].product_id, foreign.id);
+        assert!(no_cross_business_movements.is_empty());
+    }
+
+    #[test]
+    fn inventory_migration_enforces_tenant_and_movement_quantity_integrity() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "STOCK-06");
+
+        let mismatched_balance = conn.execute(
+            "INSERT INTO inventory_balances (product_id, business_id, quantity_on_hand, updated_at)
+             VALUES (?1, ?2, 1000, ?3)",
+            params![product.id, other_business.id, now_utc()],
+        );
+        assert!(mismatched_balance.is_err());
+
+        let invalid_movement = conn.execute(
+            "INSERT INTO stock_movements
+                (id, business_id, product_id, movement_type, quantity_delta,
+                 previous_quantity, new_quantity, created_at)
+             VALUES ('movement-1', ?1, ?2, 'opening_stock', 1000, 0, 999, ?3)",
+            params![business.id, product.id, now_utc()],
+        );
+        assert!(invalid_movement.is_err());
     }
 }
