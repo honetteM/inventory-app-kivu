@@ -2,6 +2,7 @@ import { createBrowserRouter } from "react-router-dom";
 import { AppLayout } from "../layouts/app-layout";
 import { PagePlaceholder } from "@/components/shared/page-placeholder";
 import { DashboardPage } from "@/modules/dashboard/dashboard-page";
+import { BusinessSetupPage } from "@/modules/settings/business-setup-page";
 
 const placeholder = (title: string, description: string) => (
   <PagePlaceholder title={title} description={description} />
@@ -24,7 +25,7 @@ export const router = createBrowserRouter([
       { path: "payments", element: placeholder("Payments", "Customer repayments and supplier payments.") },
       { path: "reports", element: placeholder("Reports", "Daily, weekly and monthly business reports.") },
       { path: "employees", element: placeholder("Employees", "Users, roles and permissions.") },
-      { path: "settings", element: placeholder("Settings", "Business configuration, backups and tax settings.") },
+      { path: "settings", element: <BusinessSetupPage /> },
     ],
   },
 ]);
