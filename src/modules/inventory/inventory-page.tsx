@@ -541,7 +541,7 @@ export function InventoryPage() {
                                     <Input
                                       id={`receipt-quantity-${item.product_id}`}
                                       type="number"
-                                      min="0.001"
+                                      min={item.base_unit_allows_decimals ? "0.001" : "1"}
                                       step={item.base_unit_allows_decimals ? "0.001" : "1"}
                                       required
                                       value={receivedQuantity}
