@@ -18,6 +18,15 @@ interface Business {
   name: string;
 }
 
+type PaymentMethod = "cash" | "mtn_mobile_money" | "airtel_money" | "bank_transfer";
+
+const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
+  { value: "cash", label: "Cash" },
+  { value: "mtn_mobile_money", label: "MTN Mobile Money" },
+  { value: "airtel_money", label: "Airtel Money" },
+  { value: "bank_transfer", label: "Bank transfer" },
+];
+
 function formatScaledQuantity(scaled: bigint): string {
   const whole = scaled / QUANTITY_SCALE;
   const fraction = scaled % QUANTITY_SCALE;
@@ -46,6 +55,22 @@ interface PosProductPageData {
 interface CartItem {
   product: PosProduct;
   quantity: string;
+}
+
+interface SaleReceipt {
+  id: string;
+  transaction_number: string;
+  payment_method: PaymentMethod;
+  total: number;
+  created_at: string;
+  items: {
+    product_name: string;
+    sku: string;
+    quantity: number;
+    unit_name: string;
+    unit_price: number;
+    line_total: number;
+  }[];
 }
 
 function formatQuantity(quantity: number): string {
@@ -107,8 +132,12 @@ export function PosPage() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [cart, setCart] = useState<CartItem[]>([]);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cash");
+  const [completedSale, setCompletedSale] = useState<SaleReceipt | null>(null);
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
   const [isLoadingProducts, setIsLoadingProducts] = useState(false);
+  const [isCheckingOut, setIsCheckingOut] = useState(false);
+  const [refreshToken, setRefreshToken] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const pageCount = Math.ceil(totalCount / PAGE_SIZE);
@@ -181,7 +210,7 @@ export function PosPage() {
       active = false;
       window.clearTimeout(timer);
     };
-  }, [businessId, page, search]);
+  }, [businessId, page, search, refreshToken]);
 
   function addToCart(product: PosProduct) {
     setError(null);
@@ -221,6 +250,39 @@ export function PosPage() {
     setCart((current) => current.filter((item) => item.product.id !== productId));
   }
 
+  async function handleCheckout() {
+    if (!businessId || cart.length === 0 || hasInvalidCartItem || isCheckingOut) {
+      return;
+    }
+
+    const items: { productId: string; quantity: number }[] = [];
+    for (const item of cart) {
+      const quantity = parseQuantity(item.quantity, item.product.base_unit_allows_decimals);
+      if (quantity === null) {
+        setError(`Enter a valid quantity for ${item.product.name}.`);
+        return;
+      }
+      items.push({ productId: item.product.id, quantity: Number(quantity) });
+    }
+
+    setError(null);
+    setIsCheckingOut(true);
+    try {
+      const receipt = await invoke<SaleReceipt>("pos_checkout", {
+        businessId,
+        items,
+        paymentMethod,
+      });
+      setCompletedSale(receipt);
+      setCart([]);
+      setRefreshToken((current) => current + 1);
+    } catch (cause) {
+      setError(`Could not complete the sale. ${errorText(cause)}`);
+    } finally {
+      setIsCheckingOut(false);
+    }
+  }
+
   if (isLoadingBusinesses) {
     return (
       <Card>
@@ -249,7 +311,7 @@ export function PosPage() {
           <p className="text-sm font-medium text-muted-foreground">Sales</p>
           <h1 className="text-3xl font-semibold tracking-tight">Point of Sale</h1>
           <p className="mt-2 text-muted-foreground">
-            Find products, check selling prices, and prepare a base-unit cart.
+            Find products, take payment, and save sales with their stock movements.
           </p>
         </div>
         <div className="w-full space-y-2 md:max-w-xs">
@@ -261,6 +323,7 @@ export function PosPage() {
               setBusinessId(event.target.value);
               setPage(0);
               setCart([]);
+              setCompletedSale(null);
             }}
             className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
           >
@@ -275,6 +338,44 @@ export function PosPage() {
         <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
           {error}
         </div>
+      ) : null}
+
+      {completedSale ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Sale completed — receipt</CardTitle>
+            <CardDescription>
+              {completedSale.transaction_number} · {new Date(completedSale.created_at).toLocaleString()}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="divide-y rounded-lg border">
+              {completedSale.items.map((item, index) => (
+                <div key={`${item.sku}-${index}`} className="flex items-center justify-between gap-4 p-3">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium">{item.product_name}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {formatQuantity(item.quantity)} {item.unit_name} × {formatProductPrice(item.unit_price)}
+                    </p>
+                  </div>
+                  <p className="shrink-0 font-medium">{formatProductPrice(item.line_total)}</p>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-between gap-4">
+              <span className="text-muted-foreground">
+                Paid by {PAYMENT_METHODS.find((method) => method.value === completedSale.payment_method)?.label}
+              </span>
+              <span className="font-semibold">{formatProductPrice(completedSale.total)}</span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Ordinary sales receipt; this is not a certified EBM tax invoice.
+            </p>
+            <Button type="button" variant="outline" onClick={() => setCompletedSale(null)}>
+              Close receipt
+            </Button>
+          </CardContent>
+        </Card>
       ) : null}
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.5fr)_minmax(22rem,1fr)]">
@@ -415,11 +516,34 @@ export function PosPage() {
                 <span>Total</span>
                 <span>{hasInvalidCartItem ? "—" : formatMoney(cartTotal)}</span>
               </div>
-              <Button className="w-full" disabled>
-                Checkout unavailable
+              <div className="space-y-2">
+                <Label htmlFor="pos-payment-method">Payment method</Label>
+                <select
+                  id="pos-payment-method"
+                  value={paymentMethod}
+                  onChange={(event) => {
+                    const selected = PAYMENT_METHODS.find((method) => method.value === event.target.value);
+                    if (selected) {
+                      setPaymentMethod(selected.value);
+                    }
+                  }}
+                  className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                >
+                  {PAYMENT_METHODS.map((method) => (
+                    <option key={method.value} value={method.value}>{method.label}</option>
+                  ))}
+                </select>
+              </div>
+              <Button
+                className="w-full"
+                disabled={cart.length === 0 || hasInvalidCartItem || isCheckingOut}
+                onClick={handleCheckout}
+              >
+                {isCheckingOut ? <LoaderCircle className="animate-spin" /> : <ShoppingCart />}
+                {isCheckingOut ? "Completing sale..." : "Complete sale"}
               </Button>
               <p className="text-xs text-muted-foreground">
-                This cart is not a saved sale. Checkout will be enabled after cashier identity, payment, and sale recording are implemented.
+                Sale, payment, receipt, and stock deduction are saved together. Credit, split payments, and cashier accounts are not implemented yet.
               </p>
               {hasInvalidCartItem ? (
                 <p role="alert" className="text-xs text-destructive">

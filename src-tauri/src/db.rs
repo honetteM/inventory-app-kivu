@@ -25,6 +25,7 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "005_receipt_cost_totals",
         include_str!("../migrations/005_receipt_cost_totals.sql"),
     ),
+    (6, "006_sales", include_str!("../migrations/006_sales.sql")),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -561,6 +562,274 @@ pub fn search_pos_products(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(PosProductPage { items, total_count })
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaleItemInput {
+    pub product_id: String,
+    pub quantity: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SaleReceiptItem {
+    pub product_name: String,
+    pub sku: String,
+    pub quantity: i64,
+    pub unit_name: String,
+    pub unit_price: i64,
+    pub line_total: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SaleReceipt {
+    pub id: String,
+    pub transaction_number: String,
+    pub payment_method: String,
+    pub total: i64,
+    pub created_at: String,
+    pub items: Vec<SaleReceiptItem>,
+}
+
+struct SaleLine {
+    id: String,
+    product_id: String,
+    product_name: String,
+    sku: String,
+    quantity: i64,
+    unit_name: String,
+    unit_price: i64,
+    line_total: i64,
+    unit_cost: i64,
+    total_cost: i64,
+    previous_quantity: i64,
+    new_quantity: i64,
+}
+
+pub fn checkout_sale(
+    conn: &Connection,
+    business_id: &str,
+    items: &[SaleItemInput],
+    payment_method: &str,
+) -> Result<SaleReceipt, DbError> {
+    if items.is_empty() || items.len() > 100 {
+        return Err(DbError::InvalidInput(
+            "a sale must contain between 1 and 100 products".to_string(),
+        ));
+    }
+    if !matches!(
+        payment_method,
+        "cash" | "mtn_mobile_money" | "airtel_money" | "bank_transfer"
+    ) {
+        return Err(DbError::InvalidInput(
+            "select a supported payment method".to_string(),
+        ));
+    }
+
+    let mut seen_products = HashSet::with_capacity(items.len());
+    for item in items {
+        if item.quantity <= 0 {
+            return Err(DbError::InvalidInput(
+                "sale quantity must be greater than zero".to_string(),
+            ));
+        }
+        if !seen_products.insert(item.product_id.as_str()) {
+            return Err(DbError::InvalidInput(
+                "a product can only appear once in a sale".to_string(),
+            ));
+        }
+    }
+
+    let sale_id = uuid::Uuid::new_v4().to_string();
+    let transaction_number = format!(
+        "SALE-{}-{}",
+        chrono::Utc::now().format("%Y%m%d"),
+        uuid::Uuid::new_v4().simple()
+    );
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    let mut lines = Vec::with_capacity(items.len());
+    let mut total = 0_i64;
+
+    for item in items {
+        let product: Option<(String, String, String, i64, i64, i64, i64, i64)> = tx
+            .query_row(
+                "SELECT p.name, p.sku, u.name, u.decimals_ok, p.selling_price,
+                        COALESCE(ib.quantity_on_hand, 0),
+                        COALESCE(ib.average_unit_cost, p.purchase_price), p.is_active
+                 FROM products p
+                 JOIN units u ON u.id = p.base_unit_id
+                 LEFT JOIN inventory_balances ib
+                   ON ib.product_id = p.id AND ib.business_id = p.business_id
+                 WHERE p.id = ?1 AND p.business_id = ?2",
+                params![item.product_id, business_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (
+            product_name,
+            sku,
+            unit_name,
+            base_unit_allows_decimals,
+            unit_price,
+            previous_quantity,
+            unit_cost,
+            is_active,
+        ) = product.ok_or_else(|| {
+            DbError::InvalidInput("a selected product does not belong to this business".to_string())
+        })?;
+        if is_active == 0 {
+            return Err(DbError::InvalidInput(
+                "a selected product is no longer active".to_string(),
+            ));
+        }
+        if base_unit_allows_decimals == 0 && item.quantity % 1000 != 0 {
+            return Err(DbError::InvalidInput(
+                "this product only allows whole base units".to_string(),
+            ));
+        }
+        let new_quantity = previous_quantity
+            .checked_sub(item.quantity)
+            .filter(|quantity| *quantity >= 0)
+            .ok_or_else(|| DbError::InvalidInput(format!("not enough stock for {product_name}")))?;
+        let line_total = i64::try_from(
+            i128::from(item.quantity)
+                .checked_mul(i128::from(unit_price))
+                .and_then(|amount| amount.checked_add(500))
+                .ok_or_else(|| {
+                    DbError::InvalidInput("sale total exceeds the supported limit".to_string())
+                })?
+                / 1000,
+        )
+        .map_err(|_| DbError::InvalidInput("sale total exceeds the supported limit".to_string()))?;
+        total = total.checked_add(line_total).ok_or_else(|| {
+            DbError::InvalidInput("sale total exceeds the supported limit".to_string())
+        })?;
+        let total_cost = stock_value(item.quantity, unit_cost)?;
+        lines.push(SaleLine {
+            id: uuid::Uuid::new_v4().to_string(),
+            product_id: item.product_id.clone(),
+            product_name,
+            sku,
+            quantity: item.quantity,
+            unit_name,
+            unit_price,
+            line_total,
+            unit_cost,
+            total_cost,
+            previous_quantity,
+            new_quantity,
+        });
+    }
+
+    tx.execute(
+        "INSERT INTO sales
+            (id, business_id, transaction_number, status, subtotal, discount, total, created_at)
+         VALUES (?1, ?2, ?3, 'completed', ?4, 0, ?4, ?5)",
+        params![sale_id, business_id, transaction_number, total, timestamp],
+    )?;
+
+    let mut receipt_items = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let updated = tx.execute(
+            "UPDATE inventory_balances
+             SET quantity_on_hand = ?1, updated_at = ?2
+             WHERE product_id = ?3 AND business_id = ?4 AND quantity_on_hand >= ?5",
+            params![
+                line.new_quantity,
+                timestamp,
+                line.product_id,
+                business_id,
+                line.quantity
+            ],
+        )?;
+        if updated != 1 {
+            return Err(DbError::InvalidInput(format!(
+                "stock changed while completing the sale for {}",
+                line.product_name
+            )));
+        }
+        tx.execute(
+            "INSERT INTO sale_items
+                (id, sale_id, business_id, product_id, product_name, sku, quantity,
+                 unit_name, unit_price, line_total, unit_cost, total_cost)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                line.id,
+                sale_id,
+                business_id,
+                line.product_id,
+                line.product_name,
+                line.sku,
+                line.quantity,
+                line.unit_name,
+                line.unit_price,
+                line.line_total,
+                line.unit_cost,
+                line.total_cost
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO stock_movements
+                (id, business_id, product_id, movement_type, quantity_delta, unit_cost,
+                 total_cost, previous_quantity, new_quantity, reference_type, reference_id,
+                 reason, created_at)
+             VALUES (?1, ?2, ?3, 'sale', ?4, ?5, ?6, ?7, ?8, 'sale', ?9,
+                     'POS sale', ?10)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                business_id,
+                line.product_id,
+                -line.quantity,
+                line.unit_cost,
+                line.total_cost,
+                line.previous_quantity,
+                line.new_quantity,
+                sale_id,
+                timestamp
+            ],
+        )?;
+        receipt_items.push(SaleReceiptItem {
+            product_name: line.product_name.clone(),
+            sku: line.sku.clone(),
+            quantity: line.quantity,
+            unit_name: line.unit_name.clone(),
+            unit_price: line.unit_price,
+            line_total: line.line_total,
+        });
+    }
+    tx.execute(
+        "INSERT INTO sale_payments (id, sale_id, payment_method, amount, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            sale_id,
+            payment_method,
+            total,
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+
+    Ok(SaleReceipt {
+        id: sale_id,
+        transaction_number,
+        payment_method: payment_method.to_string(),
+        total,
+        created_at: timestamp,
+        items: receipt_items,
+    })
 }
 
 pub fn list_products(
@@ -2338,6 +2607,108 @@ mod tests {
             .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn checkout_sale_records_receipt_payment_and_stock_movement_atomically() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "POS-SALE-01");
+        set_opening_stock(&conn, &business.id, &product.id, 2_000, None).unwrap();
+        let current_selling_price = 15_000;
+        update_base_selling_price(&conn, &business.id, &product.id, current_selling_price).unwrap();
+
+        let receipt = checkout_sale(
+            &conn,
+            &business.id,
+            &[SaleItemInput {
+                product_id: product.id.clone(),
+                quantity: 1_000,
+            }],
+            "cash",
+        )
+        .unwrap();
+        let quantity: i64 = conn
+            .query_row(
+                "SELECT quantity_on_hand FROM inventory_balances WHERE product_id = ?1",
+                params![product.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payment: (String, i64) = conn
+            .query_row(
+                "SELECT payment_method, amount FROM sale_payments WHERE sale_id = ?1",
+                params![receipt.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let movement: (i64, i64, i64, String) = conn
+            .query_row(
+                "SELECT quantity_delta, unit_cost, total_cost, reference_id
+                 FROM stock_movements WHERE reference_type = 'sale' AND reference_id = ?1",
+                params![receipt.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert!(receipt.transaction_number.starts_with("SALE-"));
+        assert_eq!(receipt.total, current_selling_price);
+        assert_eq!(receipt.items.len(), 1);
+        assert_eq!(receipt.items[0].product_name, product.name);
+        assert_eq!(receipt.items[0].unit_price, current_selling_price);
+        assert_eq!(quantity, 1_000);
+        assert_eq!(payment, ("cash".to_string(), current_selling_price));
+        assert_eq!(
+            movement,
+            (
+                -1_000,
+                product.purchase_price,
+                product.purchase_price,
+                receipt.id
+            )
+        );
+    }
+
+    #[test]
+    fn checkout_sale_rejects_insufficient_stock_and_invalid_payment_without_writes() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "POS-SALE-02");
+        set_opening_stock(&conn, &business.id, &product.id, 1_000, None).unwrap();
+        let item = SaleItemInput {
+            product_id: product.id.clone(),
+            quantity: 2_000,
+        };
+
+        assert!(matches!(
+            checkout_sale(&conn, &business.id, &[item], "cash"),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            checkout_sale(
+                &conn,
+                &business.id,
+                &[SaleItemInput {
+                    product_id: product.id.clone(),
+                    quantity: 1_000,
+                }],
+                "credit"
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        let sales_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sales", [], |row| row.get(0))
+            .unwrap();
+        let quantity: i64 = conn
+            .query_row(
+                "SELECT quantity_on_hand FROM inventory_balances WHERE product_id = ?1",
+                params![product.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(sales_count, 0);
+        assert_eq!(quantity, 1_000);
     }
 
     #[test]

@@ -125,6 +125,18 @@ fn pos_product_search(
 }
 
 #[tauri::command]
+fn pos_checkout(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    items: Vec<db::SaleItemInput>,
+    payment_method: String,
+) -> Result<db::SaleReceipt, String> {
+    state
+        .with(|conn| db::checkout_sale(conn, &business_id, &items, &payment_method))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn product_create(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -328,6 +340,7 @@ pub fn run() {
             brand_create,
             product_list,
             pos_product_search,
+            pos_checkout,
             product_create,
             product_selling_price_update,
             product_unit_list,
