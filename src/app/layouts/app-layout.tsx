@@ -21,7 +21,7 @@ export function AppLayout() {
   return (
     <SidebarProvider>
       <AppSidebar />
-      <SidebarInset className="min-h-svh bg-background">
+      <SidebarInset className="min-h-svh min-w-0 bg-background">
         <header className="sticky top-0 z-20 flex h-16 shrink-0 items-center gap-3 border-b bg-card/95 px-4 backdrop-blur-sm lg:px-6">
           <SidebarTrigger />
           <Separator orientation="vertical" className="!h-5" />
