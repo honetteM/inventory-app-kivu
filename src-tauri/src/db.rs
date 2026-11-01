@@ -41,6 +41,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "009_purchases",
         include_str!("../migrations/009_purchases.sql"),
     ),
+    (
+        10,
+        "010_supplier_payments",
+        include_str!("../migrations/010_supplier_payments.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -1136,6 +1141,14 @@ pub struct PurchaseDelivery {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct PurchasePayment {
+    pub id: String,
+    pub payment_method: String,
+    pub amount: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct Purchase {
     pub id: String,
     pub supplier_id: String,
@@ -1143,11 +1156,14 @@ pub struct Purchase {
     pub supplier_invoice_number: String,
     pub status: String,
     pub subtotal: i64,
+    pub amount_paid: i64,
+    pub balance_due: i64,
     pub duplicate_authorized: bool,
     pub duplicate_of_purchase_id: Option<String>,
     pub created_at: String,
     pub items: Vec<PurchaseItem>,
     pub deliveries: Vec<PurchaseDelivery>,
+    pub payments: Vec<PurchasePayment>,
 }
 
 fn load_purchase(
@@ -1170,14 +1186,44 @@ fn load_purchase(
                 supplier_invoice_number: row.get(3)?,
                 status: row.get(4)?,
                 subtotal: row.get(5)?,
+                amount_paid: 0,
+                balance_due: row.get(5)?,
                 duplicate_authorized: row.get::<_, i64>(6)? != 0,
                 duplicate_of_purchase_id: row.get(7)?,
                 created_at: row.get(8)?,
                 items: Vec::new(),
                 deliveries: Vec::new(),
+                payments: Vec::new(),
             })
         },
     )?;
+    let mut payment_stmt = conn.prepare(
+        "SELECT id, payment_method, amount, created_at
+         FROM purchase_payments
+         WHERE business_id = ?1 AND purchase_id = ?2
+         ORDER BY created_at DESC, id",
+    )?;
+    purchase.payments = payment_stmt
+        .query_map(params![business_id, purchase_id], |row| {
+            Ok(PurchasePayment {
+                id: row.get(0)?,
+                payment_method: row.get(1)?,
+                amount: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    purchase.amount_paid = purchase.payments.iter().try_fold(0_i64, |total, payment| {
+        total.checked_add(payment.amount).ok_or_else(|| {
+            DbError::InvalidInput("supplier payment total exceeds the supported limit".into())
+        })
+    })?;
+    purchase.balance_due = purchase
+        .subtotal
+        .checked_sub(purchase.amount_paid)
+        .ok_or_else(|| {
+            DbError::InvalidInput("supplier payments exceed the invoice total".into())
+        })?;
     let mut stmt = conn.prepare(
         "SELECT pi.id, pi.product_id, pi.product_name, pi.sku, pi.unit_name,
                 pi.ordered_quantity, pi.received_quantity, pi.unit_cost, pi.line_total,
@@ -1267,6 +1313,69 @@ pub fn list_purchases(conn: &Connection, business_id: &str) -> Result<Vec<Purcha
         .iter()
         .map(|purchase_id| load_purchase(conn, business_id, purchase_id))
         .collect()
+}
+
+pub fn record_purchase_payment(
+    conn: &Connection,
+    business_id: &str,
+    purchase_id: &str,
+    amount: i64,
+    payment_method: &str,
+) -> Result<Purchase, DbError> {
+    if amount <= 0 {
+        return Err(DbError::InvalidInput(
+            "payment amount must be greater than zero".to_string(),
+        ));
+    }
+    if !matches!(
+        payment_method,
+        "cash" | "mtn_mobile_money" | "airtel_money" | "bank_transfer"
+    ) {
+        return Err(DbError::InvalidInput(
+            "select a supported payment method".to_string(),
+        ));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let subtotal = tx
+        .query_row(
+            "SELECT subtotal FROM purchases WHERE id = ?1 AND business_id = ?2",
+            params![purchase_id, business_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            DbError::InvalidInput("purchase does not belong to this business".to_string())
+        })?;
+    let amount_paid: i64 = tx.query_row(
+        "SELECT COALESCE(SUM(amount), 0) FROM purchase_payments
+         WHERE business_id = ?1 AND purchase_id = ?2",
+        params![business_id, purchase_id],
+        |row| row.get(0),
+    )?;
+    let balance_due = subtotal.checked_sub(amount_paid).ok_or_else(|| {
+        DbError::InvalidInput("supplier payments exceed the invoice total".into())
+    })?;
+    if amount > balance_due {
+        return Err(DbError::InvalidInput(format!(
+            "payment exceeds the outstanding balance of {balance_due}"
+        )));
+    }
+    tx.execute(
+        "INSERT INTO purchase_payments
+            (id, business_id, purchase_id, payment_method, amount, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            purchase_id,
+            payment_method,
+            amount,
+            now_utc()
+        ],
+    )?;
+    tx.commit()?;
+    load_purchase(conn, business_id, purchase_id)
 }
 
 pub fn create_purchase(
@@ -4238,6 +4347,118 @@ mod tests {
             Some(purchase.id.as_str())
         );
         assert_eq!(list_purchases(&conn, &business.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn supplier_payments_track_partial_and_full_invoice_balances() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let supplier = create_supplier(
+            &conn,
+            &business.id,
+            "Kigali Building Supplies",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let product = create_test_product(&conn, &business.id, "SUPPLIER-PAYMENT-01");
+        let purchase = create_purchase(
+            &conn,
+            &business.id,
+            &supplier.id,
+            "INV-PAYMENT-01",
+            &[PurchaseItemInput {
+                product_id: product.id.clone(),
+                ordered_quantity: 2_000,
+                unit_cost: 50_000,
+            }],
+            false,
+        )
+        .unwrap();
+        assert_eq!(purchase.subtotal, 100_000);
+        assert_eq!(purchase.amount_paid, 0);
+        assert_eq!(purchase.balance_due, purchase.subtotal);
+
+        let partial = record_purchase_payment(
+            &conn,
+            &business.id,
+            &purchase.id,
+            40_000,
+            "mtn_mobile_money",
+        )
+        .unwrap();
+        assert_eq!(partial.amount_paid, 40_000);
+        assert_eq!(partial.balance_due, 60_000);
+        assert_eq!(partial.payments.len(), 1);
+        assert_eq!(partial.payments[0].payment_method, "mtn_mobile_money");
+        assert_eq!(partial.status, "pending");
+
+        let paid =
+            record_purchase_payment(&conn, &business.id, &purchase.id, 60_000, "cash").unwrap();
+        assert_eq!(paid.amount_paid, 100_000);
+        assert_eq!(paid.balance_due, 0);
+        assert_eq!(paid.payments.len(), 2);
+        assert_eq!(paid.status, "pending");
+        assert_eq!(
+            list_inventory(&conn, &business.id, Some("SUPPLIER-PAYMENT-01"), 0, 20)
+                .unwrap()
+                .items[0]
+                .quantity_on_hand,
+            0
+        );
+    }
+
+    #[test]
+    fn supplier_payments_reject_invalid_amount_method_and_business() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let supplier = create_supplier(
+            &conn,
+            &business.id,
+            "Kigali Building Supplies",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let product = create_test_product(&conn, &business.id, "SUPPLIER-PAYMENT-02");
+        let purchase = create_purchase(
+            &conn,
+            &business.id,
+            &supplier.id,
+            "INV-PAYMENT-02",
+            &[PurchaseItemInput {
+                product_id: product.id,
+                ordered_quantity: 1_000,
+                unit_cost: 50_000,
+            }],
+            false,
+        )
+        .unwrap();
+        for (business_id, amount, method) in [
+            (business.id.as_str(), 0, "cash"),
+            (business.id.as_str(), 50_001, "cash"),
+            (business.id.as_str(), 1, "unsupported"),
+            (other_business.id.as_str(), 1, "cash"),
+        ] {
+            assert!(matches!(
+                record_purchase_payment(&conn, business_id, &purchase.id, amount, method),
+                Err(DbError::InvalidInput(_))
+            ));
+        }
+        assert_eq!(
+            load_purchase(&conn, &business.id, &purchase.id)
+                .unwrap()
+                .payments
+                .len(),
+            0
+        );
     }
 
     #[test]

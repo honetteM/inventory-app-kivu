@@ -210,6 +210,21 @@ fn purchase_create(
 }
 
 #[tauri::command]
+fn purchase_record_payment(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    purchase_id: String,
+    amount: i64,
+    payment_method: String,
+) -> Result<db::Purchase, String> {
+    state
+        .with(|conn| {
+            db::record_purchase_payment(conn, &business_id, &purchase_id, amount, &payment_method)
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn purchase_receive_delivery(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -478,6 +493,7 @@ pub fn run() {
             purchase_product_list,
             purchase_list,
             purchase_create,
+            purchase_record_payment,
             purchase_receive_delivery,
             product_list,
             pos_product_search,

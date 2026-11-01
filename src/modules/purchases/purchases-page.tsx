@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { AlertTriangle, LoaderCircle, PackagePlus, ReceiptText, Truck } from "lucide-react";
+import { AlertTriangle, CreditCard, LoaderCircle, PackagePlus, ReceiptText, Truck } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,14 @@ import { Label } from "@/components/ui/label";
 const QUANTITY_SCALE = 1000n;
 const MONEY_SCALE = 100n;
 const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
+type PaymentMethod = "cash" | "mtn_mobile_money" | "airtel_money" | "bank_transfer";
+
+const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
+  { value: "cash", label: "Cash" },
+  { value: "mtn_mobile_money", label: "MTN Mobile Money" },
+  { value: "airtel_money", label: "Airtel Money" },
+  { value: "bank_transfer", label: "Bank transfer" },
+];
 
 interface Business {
   id: string;
@@ -52,6 +60,8 @@ interface Purchase {
   supplier_invoice_number: string;
   status: "pending" | "partially_received" | "received";
   subtotal: number;
+  amount_paid: number;
+  balance_due: number;
   duplicate_authorized: boolean;
   duplicate_of_purchase_id: string | null;
   created_at: string;
@@ -68,6 +78,12 @@ interface Purchase {
       unit_name: string;
       total_cost: number;
     }[];
+  }[];
+  payments: {
+    id: string;
+    payment_method: PaymentMethod;
+    amount: number;
+    created_at: string;
   }[];
 }
 
@@ -106,6 +122,23 @@ function parseUnitCost(value: string): number | null {
   }
   const scaled = BigInt(value) * MONEY_SCALE;
   return scaled <= MAX_SAFE_INTEGER ? Number(scaled) : null;
+}
+
+function parsePaymentAmount(value: string): number | null {
+  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(value);
+  if (!match) {
+    return null;
+  }
+  const fraction = (match[2] ?? "").padEnd(2, "0");
+  const amount = BigInt(match[1]) * MONEY_SCALE + BigInt(fraction || "0");
+  return amount > 0n && amount <= MAX_SAFE_INTEGER ? Number(amount) : null;
+}
+
+function moneyInputValue(scaledAmount: number): string {
+  const amount = BigInt(scaledAmount);
+  const whole = amount / MONEY_SCALE;
+  const fraction = amount % MONEY_SCALE;
+  return `${whole}.${fraction.toString().padStart(2, "0")}`;
 }
 
 function formatQuantity(quantity: number): string {
@@ -163,6 +196,10 @@ function statusVariant(status: Purchase["status"]): "outline" | "secondary" | "d
   }
 }
 
+function paymentMethodLabel(method: PaymentMethod): string {
+  return PAYMENT_METHODS.find((item) => item.value === method)?.label ?? method;
+}
+
 export function PurchasesPage() {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessId, setBusinessId] = useState("");
@@ -178,12 +215,15 @@ export function PurchasesPage() {
   const [receiveQuantities, setReceiveQuantities] = useState<Record<string, string>>({});
   const [deliveryReferences, setDeliveryReferences] = useState<Record<string, string>>({});
   const [receiveNotes, setReceiveNotes] = useState<Record<string, string>>({});
+  const [paymentAmounts, setPaymentAmounts] = useState<Record<string, string>>({});
+  const [paymentMethods, setPaymentMethods] = useState<Record<string, PaymentMethod>>({});
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
   const [duplicateAuthorizationRequested, setDuplicateAuthorizationRequested] = useState(false);
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
   const [isLoadingData, setIsLoadingData] = useState(false);
   const [isSavingPurchase, setIsSavingPurchase] = useState(false);
   const [receivingPurchaseId, setReceivingPurchaseId] = useState<string | null>(null);
+  const [payingPurchaseId, setPayingPurchaseId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const selectedProduct = products.find((product) => product.id === draftProductId);
@@ -417,6 +457,35 @@ export function PurchasesPage() {
       setError(`Could not receive this delivery. ${errorText(cause)}`);
     } finally {
       setReceivingPurchaseId(null);
+    }
+  }
+
+  async function handleRecordPayment(event: FormEvent<HTMLFormElement>, purchase: Purchase) {
+    event.preventDefault();
+    if (!businessId || payingPurchaseId) {
+      return;
+    }
+    const amount = parsePaymentAmount(paymentAmounts[purchase.id]?.trim() ?? "");
+    if (amount === null || amount > purchase.balance_due) {
+      setError(`Enter a valid payment up to ${formatMoney(purchase.balance_due)}.`);
+      return;
+    }
+
+    setError(null);
+    setPayingPurchaseId(purchase.id);
+    try {
+      const updated = await invoke<Purchase>("purchase_record_payment", {
+        businessId,
+        purchaseId: purchase.id,
+        amount,
+        paymentMethod: paymentMethods[purchase.id] ?? "cash",
+      });
+      setPurchases((current) => current.map((item) => item.id === purchase.id ? updated : item));
+      setPaymentAmounts((current) => ({ ...current, [purchase.id]: "" }));
+    } catch (cause) {
+      setError(`Could not record the supplier payment. ${errorText(cause)}`);
+    } finally {
+      setPayingPurchaseId(null);
     }
   }
 
@@ -695,7 +764,11 @@ export function PurchasesPage() {
                             Invoice {purchase.supplier_invoice_number} · {new Date(purchase.created_at).toLocaleString()}
                           </CardDescription>
                         </div>
-                        <p className="font-semibold">{formatMoney(purchase.subtotal)}</p>
+                        <div className="text-sm sm:text-right">
+                          <p className="font-semibold">Invoice: {formatMoney(purchase.subtotal)}</p>
+                          <p className="text-muted-foreground">Paid: {formatMoney(purchase.amount_paid)}</p>
+                          <p className="font-medium">Balance due: {formatMoney(purchase.balance_due)}</p>
+                        </div>
                       </div>
                       {purchase.duplicate_of_purchase_id ? (
                         <p className="text-sm text-amber-700">
@@ -704,6 +777,65 @@ export function PurchasesPage() {
                       ) : null}
                     </CardHeader>
                     <CardContent className="space-y-4">
+                      {purchase.balance_due > 0 ? (
+                        <form
+                          className="grid gap-3 rounded-lg border p-4 md:grid-cols-[1fr_1fr_auto]"
+                          onSubmit={(event) => void handleRecordPayment(event, purchase)}
+                        >
+                          <div className="space-y-2">
+                            <Label htmlFor={`payment-amount-${purchase.id}`}>Payment amount (RWF)</Label>
+                            <Input
+                              id={`payment-amount-${purchase.id}`}
+                              type="number"
+                              min="0.01"
+                              max={moneyInputValue(purchase.balance_due)}
+                              step="0.01"
+                              value={paymentAmounts[purchase.id] ?? ""}
+                              onChange={(event) => setPaymentAmounts((current) => ({
+                                ...current,
+                                [purchase.id]: event.target.value,
+                              }))}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor={`payment-method-${purchase.id}`}>Payment method</Label>
+                            <select
+                              id={`payment-method-${purchase.id}`}
+                              value={paymentMethods[purchase.id] ?? "cash"}
+                              onChange={(event) => setPaymentMethods((current) => ({
+                                ...current,
+                                [purchase.id]: event.target.value as PaymentMethod,
+                              }))}
+                              className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                            >
+                              {PAYMENT_METHODS.map((method) => (
+                                <option key={method.value} value={method.value}>{method.label}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <Button type="submit" className="self-end" disabled={payingPurchaseId !== null}>
+                            {payingPurchaseId === purchase.id
+                              ? <LoaderCircle className="animate-spin" />
+                              : <CreditCard />}
+                            {payingPurchaseId === purchase.id ? "Recording..." : "Record payment"}
+                          </Button>
+                        </form>
+                      ) : (
+                        <Badge variant="secondary">Invoice fully paid</Badge>
+                      )}
+                      {purchase.payments.length > 0 ? (
+                        <div className="space-y-2">
+                          <h3 className="text-sm font-medium">Payment history</h3>
+                          <ul className="divide-y rounded-lg border px-4">
+                            {purchase.payments.map((payment) => (
+                              <li key={payment.id} className="flex flex-wrap items-center justify-between gap-2 py-3 text-sm">
+                                <span>{paymentMethodLabel(payment.payment_method)} · {new Date(payment.created_at).toLocaleString()}</span>
+                                <span className="font-medium">{formatMoney(payment.amount)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
                       <ul className="divide-y rounded-lg border px-4">
                         {purchase.items.map((item) => {
                           const remaining = item.ordered_quantity - item.received_quantity;
@@ -814,7 +946,7 @@ export function PurchasesPage() {
             )}
           </section>
           <p className="text-xs text-muted-foreground">
-            Invoice payments, discounts, taxes, extra transport costs, and attachments are not part of this step.
+            Discounts, taxes, extra transport costs, and attachments are not part of this step.
           </p>
         </>
       )}
