@@ -167,6 +167,70 @@ fn supplier_update(
 }
 
 #[tauri::command]
+fn customer_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::Customer>, String> {
+    state
+        .with(|conn| db::list_customers(conn, &business_id))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn customer_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    name: String,
+    phone: Option<String>,
+    address: Option<String>,
+    customer_type: String,
+    credit_limit: i64,
+) -> Result<db::Customer, String> {
+    state
+        .with(|conn| {
+            db::create_customer(
+                conn,
+                &business_id,
+                &name,
+                phone.as_deref(),
+                address.as_deref(),
+                &customer_type,
+                credit_limit,
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn customer_update(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    customer_id: String,
+    name: String,
+    phone: Option<String>,
+    address: Option<String>,
+    customer_type: String,
+    credit_limit: i64,
+    is_active: bool,
+) -> Result<db::Customer, String> {
+    state
+        .with(|conn| {
+            db::update_customer(
+                conn,
+                &business_id,
+                &customer_id,
+                &name,
+                phone.as_deref(),
+                address.as_deref(),
+                &customer_type,
+                credit_limit,
+                is_active,
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn purchase_product_list(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -490,6 +554,9 @@ pub fn run() {
             supplier_list,
             supplier_create,
             supplier_update,
+            customer_list,
+            customer_create,
+            customer_update,
             purchase_product_list,
             purchase_list,
             purchase_create,

@@ -51,6 +51,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "011_inventory_cost_layers",
         include_str!("../migrations/011_inventory_cost_layers.sql"),
     ),
+    (
+        12,
+        "012_customers",
+        include_str!("../migrations/012_customers.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -791,6 +796,173 @@ pub fn update_supplier(
          FROM suppliers WHERE id = ?1 AND business_id = ?2",
         params![supplier_id, business_id],
         map_supplier,
+    )
+    .map_err(DbError::Sqlite)
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct Customer {
+    pub id: String,
+    pub business_id: String,
+    pub name: String,
+    pub phone: Option<String>,
+    pub address: Option<String>,
+    pub customer_type: String,
+    pub credit_limit: i64,
+    pub is_active: bool,
+}
+
+fn customer_name(name: &str) -> Result<String, DbError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(DbError::InvalidInput(
+            "customer name must not be empty".to_string(),
+        ));
+    }
+    if name.chars().count() > 160 {
+        return Err(DbError::InvalidInput(
+            "customer name must be 160 characters or fewer".to_string(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn validate_customer_type(customer_type: &str) -> Result<(), DbError> {
+    if !matches!(customer_type, "individual" | "business") {
+        return Err(DbError::InvalidInput(
+            "customer type must be individual or business".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn map_customer(row: &rusqlite::Row<'_>) -> rusqlite::Result<Customer> {
+    Ok(Customer {
+        id: row.get(0)?,
+        business_id: row.get(1)?,
+        name: row.get(2)?,
+        phone: row.get(3)?,
+        address: row.get(4)?,
+        customer_type: row.get(5)?,
+        credit_limit: row.get(6)?,
+        is_active: row.get::<_, i64>(7)? != 0,
+    })
+}
+
+pub fn list_customers(conn: &Connection, business_id: &str) -> Result<Vec<Customer>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, business_id, name, phone, address, customer_type, credit_limit, is_active
+         FROM customers WHERE business_id = ?1
+         ORDER BY is_active DESC, name COLLATE NOCASE, id",
+    )?;
+    let customers = stmt
+        .query_map(params![business_id], map_customer)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(customers)
+}
+
+pub fn create_customer(
+    conn: &Connection,
+    business_id: &str,
+    name: &str,
+    phone: Option<&str>,
+    address: Option<&str>,
+    customer_type: &str,
+    credit_limit: i64,
+) -> Result<Customer, DbError> {
+    let name = customer_name(name)?;
+    let phone = clean_supplier_field(phone, "phone", 80)?;
+    let address = clean_supplier_field(address, "address", 500)?;
+    validate_customer_type(customer_type)?;
+    if credit_limit < 0 {
+        return Err(DbError::InvalidInput(
+            "credit limit must not be negative".to_string(),
+        ));
+    }
+    let business_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM businesses WHERE id = ?1)",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    if !business_exists {
+        return Err(DbError::InvalidInput("business does not exist".to_string()));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    conn.execute(
+        "INSERT INTO customers
+            (id, business_id, name, phone, address, customer_type, credit_limit,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        params![
+            id,
+            business_id,
+            name,
+            phone,
+            address,
+            customer_type,
+            credit_limit,
+            timestamp
+        ],
+    )?;
+    conn.query_row(
+        "SELECT id, business_id, name, phone, address, customer_type, credit_limit, is_active
+         FROM customers WHERE id = ?1 AND business_id = ?2",
+        params![id, business_id],
+        map_customer,
+    )
+    .map_err(DbError::Sqlite)
+}
+
+pub fn update_customer(
+    conn: &Connection,
+    business_id: &str,
+    customer_id: &str,
+    name: &str,
+    phone: Option<&str>,
+    address: Option<&str>,
+    customer_type: &str,
+    credit_limit: i64,
+    is_active: bool,
+) -> Result<Customer, DbError> {
+    let name = customer_name(name)?;
+    let phone = clean_supplier_field(phone, "phone", 80)?;
+    let address = clean_supplier_field(address, "address", 500)?;
+    validate_customer_type(customer_type)?;
+    if credit_limit < 0 {
+        return Err(DbError::InvalidInput(
+            "credit limit must not be negative".to_string(),
+        ));
+    }
+    let timestamp = now_utc();
+    let updated = conn.execute(
+        "UPDATE customers
+         SET name = ?1, phone = ?2, address = ?3, customer_type = ?4,
+             credit_limit = ?5, is_active = ?6, updated_at = ?7
+         WHERE id = ?8 AND business_id = ?9",
+        params![
+            name,
+            phone,
+            address,
+            customer_type,
+            credit_limit,
+            i64::from(is_active),
+            timestamp,
+            customer_id,
+            business_id
+        ],
+    )?;
+    if updated != 1 {
+        return Err(DbError::InvalidInput(
+            "customer does not belong to this business".to_string(),
+        ));
+    }
+    conn.query_row(
+        "SELECT id, business_id, name, phone, address, customer_type, credit_limit, is_active
+         FROM customers WHERE id = ?1 AND business_id = ?2",
+        params![customer_id, business_id],
+        map_customer,
     )
     .map_err(DbError::Sqlite)
 }
@@ -3561,7 +3733,10 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         apply_pragmas(&conn).unwrap();
         applied_versions(&conn).unwrap();
-        for (version, name, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 1) {
+        for (version, name, sql) in MIGRATIONS
+            .iter()
+            .take_while(|(version, _, _)| *version < 11)
+        {
             let tx = conn.transaction().unwrap();
             tx.execute_batch(sql).unwrap();
             tx.execute(
@@ -4323,6 +4498,142 @@ mod tests {
             list_suppliers(&conn, &business.id).unwrap()[0].id,
             supplier.id
         );
+    }
+
+    #[test]
+    fn customers_are_business_scoped_and_profile_fields_are_normalized() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+
+        let customer = create_customer(
+            &conn,
+            &business.id,
+            "  Aline Mukamana  ",
+            Some("  +250 788 000 000  "),
+            Some("  Kigali  "),
+            "individual",
+            1_250_500,
+        )
+        .unwrap();
+        create_customer(
+            &conn,
+            &other_business.id,
+            "Aline Mukamana",
+            None,
+            None,
+            "business",
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(customer.name, "Aline Mukamana");
+        assert_eq!(customer.phone.as_deref(), Some("+250 788 000 000"));
+        assert_eq!(customer.address.as_deref(), Some("Kigali"));
+        assert_eq!(customer.customer_type, "individual");
+        assert_eq!(customer.credit_limit, 1_250_500);
+        assert_eq!(list_customers(&conn, &business.id).unwrap().len(), 1);
+        assert_eq!(list_customers(&conn, &other_business.id).unwrap().len(), 1);
+        assert!(matches!(
+            update_customer(
+                &conn,
+                &other_business.id,
+                &customer.id,
+                "Unauthorized edit",
+                None,
+                None,
+                "individual",
+                0,
+                true
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+
+        let updated = update_customer(
+            &conn,
+            &business.id,
+            &customer.id,
+            "Aline M.",
+            Some("  "),
+            None,
+            "business",
+            2_500_000,
+            false,
+        )
+        .unwrap();
+        assert_eq!(updated.name, "Aline M.");
+        assert_eq!(updated.phone, None);
+        assert_eq!(updated.customer_type, "business");
+        assert_eq!(updated.credit_limit, 2_500_000);
+        assert!(!updated.is_active);
+        assert_eq!(
+            list_customers(&conn, &business.id).unwrap()[0].id,
+            customer.id
+        );
+    }
+
+    #[test]
+    fn customer_creation_rejects_invalid_name_business_type_limit_and_field_lengths() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+
+        assert!(matches!(
+            create_customer(&conn, &business.id, " ", None, None, "individual", 0),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_customer(
+                &conn,
+                "missing-business",
+                "Customer",
+                None,
+                None,
+                "individual",
+                0
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_customer(&conn, &business.id, "Customer", None, None, "supplier", 0),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_customer(
+                &conn,
+                &business.id,
+                "Customer",
+                None,
+                None,
+                "individual",
+                -1
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_customer(
+                &conn,
+                &business.id,
+                "Customer",
+                Some(&"x".repeat(81)),
+                None,
+                "individual",
+                0
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_customer(
+                &conn,
+                &business.id,
+                "Customer",
+                None,
+                Some(&"x".repeat(501)),
+                "individual",
+                0
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(list_customers(&conn, &business.id).unwrap().is_empty());
     }
 
     #[test]
