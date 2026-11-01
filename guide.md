@@ -538,13 +538,11 @@ Unpaid supplier invoices - Supplier payments - Authorized adjustments.
 
 ## Inventory costing
 
-Use weighted average cost for the initial version.
+Use FIFO purchase-cost layers for inventory valuation and cost of goods sold.
 
-Weighted average cost:
+Every received purchase creates a cost layer containing the received quantity and actual purchase cost. When stock is sold or removed, consume the oldest remaining layers first. Value on-hand stock as the sum of each remaining layer's quantity multiplied by its recorded unit cost.
 
-(Previous stock value + New received stock value) / (Previous stock quantity + New received stock quantity).
-
-When goods are sold, recognize the cost using the applicable average cost at the transaction time.
+For legacy stock, reconstruct remaining layers from the stock-movement ledger. Use the existing average cost only for quantities that cannot be matched to recorded movements.
 
 Historical sales costs must never change simply because the purchase price changes later.
 
@@ -894,7 +892,7 @@ Test these scenarios:
 4. Record 5 damaged bags.
 5. Confirm the remaining quantity.
 6. Purchase the same product at a different cost.
-7. Verify weighted average cost.
+7. Verify FIFO stock value and cost of goods sold across purchase layers.
 8. Make a partially paid sale.
 9. Record customer repayment.
 10. Verify outstanding customer debt.

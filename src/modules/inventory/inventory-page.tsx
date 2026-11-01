@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState, type FormEvent } from "react";
 import { Fragment } from "react";
-import { History, LoaderCircle, Search, Warehouse } from "lucide-react";
+import { CircleDollarSign, History, LoaderCircle, Package, Search, Tag, TriangleAlert, Warehouse } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,9 +34,9 @@ interface InventoryItem {
   sku: string;
   base_unit_name: string;
   quantity_on_hand: number;
-  average_unit_cost: number;
   stock_value: number;
   selling_price: number;
+  minimum_selling_price: number;
   min_stock_quantity: number;
   base_unit_allows_decimals: boolean;
   has_movements: boolean;
@@ -45,6 +45,9 @@ interface InventoryItem {
 interface InventoryPageData {
   items: InventoryItem[];
   total_count: number;
+  total_stock_value: number;
+  low_stock_count: number;
+  out_of_stock_count: number;
 }
 
 interface StockMovement {
@@ -118,6 +121,16 @@ function toScaledSellingPrice(value: string): number {
   return Number(scaled);
 }
 
+function moneyInputValue(scaledAmount: number): string {
+  if (!Number.isSafeInteger(scaledAmount) || scaledAmount < 0) {
+    return "";
+  }
+  const amount = BigInt(scaledAmount);
+  const whole = amount / MONEY_SCALE;
+  const fraction = amount % MONEY_SCALE;
+  return fraction === 0n ? whole.toString() : `${whole}.${fraction.toString().padStart(2, "0")}`;
+}
+
 function formatMoney(scaledAmount: number): string {
   if (!Number.isSafeInteger(scaledAmount)) {
     return "Invalid amount";
@@ -141,11 +154,31 @@ function movementLabel(value: string): string {
     .join(" ");
 }
 
+function movementCostLabel(value: string): string {
+  switch (value) {
+    case "purchase_received":
+      return "Delivery cost";
+    case "sale":
+      return "Cost of goods sold";
+    case "stock_correction":
+      return "Stock adjustment value";
+    case "opening_stock":
+      return "Opening stock value";
+    default:
+      return "Movement value";
+  }
+}
+
 export function InventoryPage() {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessId, setBusinessId] = useState("");
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [totalCount, setTotalCount] = useState(0);
+  const [inventorySummary, setInventorySummary] = useState({
+    total_stock_value: 0,
+    low_stock_count: 0,
+    out_of_stock_count: 0,
+  });
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [expandedProductId, setExpandedProductId] = useState<string | null>(null);
@@ -157,6 +190,7 @@ export function InventoryPage() {
   const [receivedQuantity, setReceivedQuantity] = useState("");
   const [receivedUnitCost, setReceivedUnitCost] = useState("");
   const [newSellingPrice, setNewSellingPrice] = useState("");
+  const [sellingPriceDraft, setSellingPriceDraft] = useState("");
   const [receiptReference, setReceiptReference] = useState("");
   const [receiptNotes, setReceiptNotes] = useState("");
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
@@ -200,6 +234,7 @@ export function InventoryPage() {
     if (!businessId) {
       setInventory([]);
       setTotalCount(0);
+      setInventorySummary({ total_stock_value: 0, low_stock_count: 0, out_of_stock_count: 0 });
       setExpandedProductId(null);
       return;
     }
@@ -217,6 +252,11 @@ export function InventoryPage() {
           if (active) {
             setInventory(result.items);
             setTotalCount(result.total_count);
+            setInventorySummary({
+              total_stock_value: result.total_stock_value,
+              low_stock_count: result.low_stock_count,
+              out_of_stock_count: result.out_of_stock_count,
+            });
             if (expandedProductId && !result.items.some((item) => item.product_id === expandedProductId)) {
               setExpandedProductId(null);
             }
@@ -247,6 +287,7 @@ export function InventoryPage() {
     setReceivedQuantity("");
     setReceivedUnitCost("");
     setNewSellingPrice("");
+    setSellingPriceDraft("");
     setReceiptReference("");
     setReceiptNotes("");
     if (!businessId || !expandedProductId) {
@@ -308,6 +349,11 @@ export function InventoryPage() {
       });
       setInventory(result.items);
       setTotalCount(result.total_count);
+      setInventorySummary({
+        total_stock_value: result.total_stock_value,
+        low_stock_count: result.low_stock_count,
+        out_of_stock_count: result.out_of_stock_count,
+      });
       const history = await invoke<StockMovement[]>("stock_movement_list", {
         businessId,
         productId: selectedProduct.product_id,
@@ -351,6 +397,11 @@ export function InventoryPage() {
       });
       setInventory(result.items);
       setTotalCount(result.total_count);
+      setInventorySummary({
+        total_stock_value: result.total_stock_value,
+        low_stock_count: result.low_stock_count,
+        out_of_stock_count: result.out_of_stock_count,
+      });
       const history = await invoke<StockMovement[]>("stock_movement_list", {
         businessId,
         productId: selectedProduct.product_id,
@@ -399,6 +450,11 @@ export function InventoryPage() {
       });
       setInventory(result.items);
       setTotalCount(result.total_count);
+      setInventorySummary({
+        total_stock_value: result.total_stock_value,
+        low_stock_count: result.low_stock_count,
+        out_of_stock_count: result.out_of_stock_count,
+      });
       const history = await invoke<StockMovement[]>("stock_movement_list", {
         businessId,
         productId: selectedProduct.product_id,
@@ -408,6 +464,42 @@ export function InventoryPage() {
       setMovements(history);
     } catch (cause) {
       setError(`Could not receive stock. ${errorText(cause)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleSellingPriceUpdate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!businessId || !selectedProduct) {
+      setError("Select a product before changing its selling price.");
+      return;
+    }
+
+    setError(null);
+    setIsSaving(true);
+    try {
+      await invoke("product_selling_price_update", {
+        businessId,
+        productId: selectedProduct.product_id,
+        sellingPrice: toScaledSellingPrice(sellingPriceDraft),
+      });
+      setSellingPriceDraft("");
+      const result = await invoke<InventoryPageData>("inventory_list", {
+        businessId,
+        search: search.trim() || null,
+        offset: page * PAGE_SIZE,
+        limit: PAGE_SIZE,
+      });
+      setInventory(result.items);
+      setTotalCount(result.total_count);
+      setInventorySummary({
+        total_stock_value: result.total_stock_value,
+        low_stock_count: result.low_stock_count,
+        out_of_stock_count: result.out_of_stock_count,
+      });
+    } catch (cause) {
+      setError(`Could not update the selling price. ${errorText(cause)}`);
     } finally {
       setIsSaving(false);
     }
@@ -433,6 +525,9 @@ export function InventoryPage() {
                 setBusinessId(event.target.value);
                 setPage(0);
                 setExpandedProductId(null);
+                setInventory([]);
+                setTotalCount(0);
+                setInventorySummary({ total_stock_value: 0, low_stock_count: 0, out_of_stock_count: 0 });
               }}
               className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
             >
@@ -464,11 +559,48 @@ export function InventoryPage() {
           </CardContent>
         </Card>
       ) : (
+        <>
+        <div className="grid gap-4 md:grid-cols-3">
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Inventory value</CardTitle>
+              <CircleDollarSign className="size-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-semibold">{formatMoney(inventorySummary.total_stock_value)}</p>
+              <p className="text-xs text-muted-foreground">Remaining stock at recorded purchase costs</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Products in results</CardTitle>
+              <Package className="size-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-semibold">{totalCount.toLocaleString("en-RW")}</p>
+              <p className="text-xs text-muted-foreground">Active products matching the current search</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Stock alerts</CardTitle>
+              <TriangleAlert className="size-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <p className="text-2xl font-semibold">
+                {(inventorySummary.low_stock_count + inventorySummary.out_of_stock_count).toLocaleString("en-RW")}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {inventorySummary.low_stock_count.toLocaleString("en-RW")} low · {inventorySummary.out_of_stock_count.toLocaleString("en-RW")} out of stock
+              </p>
+            </CardContent>
+          </Card>
+        </div>
         <Card>
           <CardHeader>
             <CardTitle>Stock balances</CardTitle>
             <CardDescription>
-              {totalCount.toLocaleString("en-RW")} active products · stock value uses weighted-average purchase cost
+              {totalCount.toLocaleString("en-RW")} active products · stock value follows remaining FIFO purchase layers
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -499,6 +631,7 @@ export function InventoryPage() {
                 </p>
               </div>
             ) : (
+              <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -506,8 +639,8 @@ export function InventoryPage() {
                     <TableHead>SKU</TableHead>
                     <TableHead>Base unit</TableHead>
                     <TableHead className="text-right">On hand</TableHead>
-                    <TableHead className="text-right">Avg. unit cost</TableHead>
                     <TableHead className="text-right">Stock value</TableHead>
+                    <TableHead className="text-right">Selling price</TableHead>
                     <TableHead className="text-right">Minimum</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Actions</TableHead>
@@ -524,8 +657,13 @@ export function InventoryPage() {
                           <TableCell>{item.sku}</TableCell>
                           <TableCell>{item.base_unit_name}</TableCell>
                           <TableCell className="text-right">{formatQuantity(item.quantity_on_hand)}</TableCell>
-                          <TableCell className="text-right">{formatMoney(item.average_unit_cost)}</TableCell>
                           <TableCell className="text-right">{formatMoney(item.stock_value)}</TableCell>
+                          <TableCell className="text-right">
+                            <span>{formatMoney(item.selling_price)}</span>
+                            {item.selling_price < item.minimum_selling_price ? (
+                              <span className="mt-1 block text-xs text-amber-700">Below highest cost</span>
+                            ) : null}
+                          </TableCell>
                           <TableCell className="text-right">{formatQuantity(item.min_stock_quantity)}</TableCell>
                           <TableCell>
                             <Badge variant={isLowStock ? "destructive" : "secondary"}>
@@ -588,9 +726,41 @@ export function InventoryPage() {
                                 {!item.has_movements ? (
                                   <p className="text-xs text-muted-foreground">
                                     Opening stock valuation starts from the product&apos;s saved purchase price of{" "}
-                                    {formatMoney(item.average_unit_cost)} per {item.base_unit_name}.
+                                    {formatMoney(item.minimum_selling_price)} per {item.base_unit_name}.
                                   </p>
                                 ) : null}
+
+                                <form
+                                  className="grid gap-3 rounded-lg border bg-background p-4 md:grid-cols-[1fr_auto]"
+                                  onSubmit={handleSellingPriceUpdate}
+                                >
+                                  <div className="space-y-2">
+                                    <Label htmlFor={`selling-price-${item.product_id}`}>
+                                      Selling price per {item.base_unit_name} (RWF)
+                                    </Label>
+                                    <Input
+                                      id={`selling-price-${item.product_id}`}
+                                      type="number"
+                                      min={moneyInputValue(item.minimum_selling_price)}
+                                      step="0.01"
+                                      required
+                                      value={sellingPriceDraft}
+                                      onChange={(event) => setSellingPriceDraft(event.target.value)}
+                                      placeholder={moneyInputValue(item.selling_price)}
+                                    />
+                                    <p className="text-xs text-muted-foreground">
+                                      Must cover the highest purchase cost on hand: {formatMoney(item.minimum_selling_price)}. Approved below-cost sales need a reason at checkout.
+                                    </p>
+                                  </div>
+                                  <Button
+                                    type="submit"
+                                    className="self-end"
+                                    disabled={isSaving || !sellingPriceDraft}
+                                  >
+                                    {isSaving ? <LoaderCircle className="animate-spin" /> : <Tag />}
+                                    Update selling price
+                                  </Button>
+                                </form>
 
                                 <form
                                   className="grid gap-3 rounded-lg border bg-background p-4 md:grid-cols-2 xl:grid-cols-5"
@@ -741,7 +911,7 @@ export function InventoryPage() {
                                                 ? ` · ${formatMoney(movement.unit_cost)}/${selectedProduct?.base_unit_name ?? "unit"}`
                                                 : ""}
                                               {movement.total_cost !== null
-                                                ? ` · ${movement.movement_type === "purchase_received" ? "Delivery total" : "Opening value"}: ${formatMoney(movement.total_cost)}`
+                                                ? ` · ${movementCostLabel(movement.movement_type)}: ${formatMoney(movement.total_cost)}`
                                                 : ""}
                                             </p>
                                           </div>
@@ -766,6 +936,7 @@ export function InventoryPage() {
                   })}
                 </TableBody>
               </Table>
+              </div>
             )}
 
             <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
@@ -781,6 +952,7 @@ export function InventoryPage() {
             </div>
           </CardContent>
         </Card>
+        </>
       )}
     </div>
   );

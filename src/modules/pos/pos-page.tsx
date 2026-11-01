@@ -43,6 +43,7 @@ interface PosProduct {
   barcode: string | null;
   base_unit_name: string;
   selling_price: number;
+  minimum_selling_price: number;
   quantity_on_hand: number;
   base_unit_allows_decimals: boolean;
 }
@@ -57,6 +58,7 @@ interface CartItem {
   quantity: string;
   sellingPrice: string;
   priceChangeReason: string;
+  belowCostReasonRequired: boolean;
 }
 
 interface SaleReceipt {
@@ -179,7 +181,8 @@ export function PosPage() {
       : null;
     const hasPriceChange = price !== null && price !== listedPrice;
     return lineTotal(item.product, item.quantity, item.sellingPrice) === null ||
-      (hasPriceChange && !item.priceChangeReason.trim());
+      (hasPriceChange && !item.priceChangeReason.trim()) ||
+      (item.belowCostReasonRequired && !item.priceChangeReason.trim());
   });
 
   useEffect(() => {
@@ -279,13 +282,23 @@ export function PosPage() {
       quantity: "1",
       sellingPrice: moneyInputValue(product.selling_price),
       priceChangeReason: "",
+      belowCostReasonRequired: false,
     }]);
   }
 
   function updateCartItem(productId: string, patch: Partial<Pick<CartItem, "quantity" | "sellingPrice" | "priceChangeReason">>) {
     setCart((current) =>
       current.map((item) =>
-        item.product.id === productId ? { ...item, ...patch } : item,
+        item.product.id === productId
+          ? {
+              ...item,
+              ...patch,
+              belowCostReasonRequired:
+                patch.quantity !== undefined || patch.sellingPrice !== undefined
+                  ? false
+                  : item.belowCostReasonRequired,
+            }
+          : item,
       ),
     );
   }
@@ -317,15 +330,15 @@ export function PosPage() {
         return;
       }
       const priceChanged = sellingPrice !== BigInt(item.product.selling_price);
-      if (priceChanged && !item.priceChangeReason.trim()) {
-        setError(`Enter a reason for changing the selling price of ${item.product.name}.`);
+      if ((priceChanged || item.belowCostReasonRequired) && !item.priceChangeReason.trim()) {
+        setError(`Enter a reason for the price change or below-cost sale of ${item.product.name}.`);
         return;
       }
       items.push({
         productId: item.product.id,
         quantity: Number(quantity),
         sellingPrice: priceChanged ? Number(sellingPrice) : null,
-        priceChangeReason: priceChanged ? item.priceChangeReason.trim() : null,
+        priceChangeReason: item.priceChangeReason.trim() || null,
       });
     }
 
@@ -341,7 +354,17 @@ export function PosPage() {
       setCart([]);
       setRefreshToken((current) => current + 1);
     } catch (cause) {
-      setError(`Could not complete the sale. ${errorText(cause)}`);
+      const message = errorText(cause);
+      const belowCostMatch = /BELOW_FIFO_COST:([^:]+):/.exec(message);
+      if (belowCostMatch) {
+        const productId = belowCostMatch[1];
+        setCart((current) => current.map((item) =>
+          item.product.id === productId ? { ...item, belowCostReasonRequired: true } : item,
+        ));
+        setError("This sale is below the actual FIFO purchase cost. Enter a reason to authorize and record the loss, then retry.");
+      } else {
+        setError(`Could not complete the sale. ${message}`);
+      }
     } finally {
       setIsCheckingOut(false);
     }
@@ -552,6 +575,11 @@ export function PosPage() {
                           <p className="text-xs text-muted-foreground">
                             Default price: {formatProductPrice(item.product.selling_price)} per {item.product.base_unit_name}
                           </p>
+                          {item.product.selling_price < item.product.minimum_selling_price ? (
+                            <p className="text-xs text-amber-700">
+                              Below some on-hand purchase costs ({formatProductPrice(item.product.minimum_selling_price)}); a sale that makes a FIFO loss needs a reason.
+                            </p>
+                          ) : null}
                         </div>
                         <Button
                           type="button"
@@ -593,10 +621,10 @@ export function PosPage() {
                             />
                           </div>
                         </div>
-                        {priceChanged ? (
+                        {priceChanged || item.belowCostReasonRequired ? (
                           <div className="space-y-1">
                             <Label htmlFor={`pos-price-reason-${item.product.id}`} className="text-xs">
-                              Reason for changing the price (required)
+                              Reason for price change or below-cost sale (required)
                             </Label>
                             <Input
                               id={`pos-price-reason-${item.product.id}`}
@@ -649,7 +677,7 @@ export function PosPage() {
                 {isCheckingOut ? "Completing sale..." : "Complete sale"}
               </Button>
               <p className="text-xs text-muted-foreground">
-                Sale, payment, receipt, and stock deduction are saved together. Credit, split payments, and cashier accounts are not implemented yet.
+                Sale, payment, FIFO purchase cost, receipt, and stock deduction are saved together. A sale below actual FIFO cost requires a recorded reason.
               </p>
               {hasInvalidCartItem ? (
                 <p role="alert" className="text-xs text-destructive">

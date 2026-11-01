@@ -1,5 +1,5 @@
 use rusqlite::{Connection, OptionalExtension, params};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -45,6 +45,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         10,
         "010_supplier_payments",
         include_str!("../migrations/010_supplier_payments.sql"),
+    ),
+    (
+        11,
+        "011_inventory_cost_layers",
+        include_str!("../migrations/011_inventory_cost_layers.sql"),
     ),
 ];
 
@@ -137,12 +142,158 @@ pub fn run_migrations(conn: &mut Connection) -> Result<(), DbError> {
         let tx = conn.transaction().map_err(DbError::Sqlite)?;
         tx.execute_batch(sql)
             .map_err(|e| DbError::Migration(*version, e.to_string()))?;
+        if *version == 11 {
+            backfill_inventory_cost_layers(&tx)
+                .map_err(|e| DbError::Migration(*version, e.to_string()))?;
+        }
         tx.execute(
             "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
             params![version, name, now_utc()],
         )
         .map_err(|e| DbError::Migration(*version, e.to_string()))?;
         tx.commit().map_err(DbError::Sqlite)?;
+    }
+    Ok(())
+}
+
+struct BackfillCostLayer {
+    movement_id: Option<String>,
+    source_type: String,
+    quantity_received: i64,
+    quantity_remaining: i64,
+    unit_cost: i64,
+    created_at: String,
+}
+
+fn backfill_inventory_cost_layers(conn: &Connection) -> Result<(), DbError> {
+    let balances = {
+        let mut stmt = conn.prepare(
+            "SELECT ib.business_id, ib.product_id, ib.quantity_on_hand,
+                    ib.average_unit_cost, p.purchase_price, ib.updated_at
+             FROM inventory_balances ib
+             JOIN products p ON p.id = ib.product_id AND p.business_id = ib.business_id
+             ORDER BY ib.business_id, ib.product_id",
+        )?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+
+    for (business_id, product_id, actual_quantity, average_cost, product_cost, updated_at) in
+        balances
+    {
+        let movements = {
+            let mut stmt = conn.prepare(
+                "SELECT id, movement_type, quantity_delta, unit_cost, created_at
+                 FROM stock_movements
+                 WHERE business_id = ?1 AND product_id = ?2
+                 ORDER BY created_at, rowid",
+            )?;
+            stmt.query_map(params![business_id, product_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut layers = VecDeque::new();
+        for (movement_id, movement_type, quantity_delta, movement_cost, created_at) in movements {
+            if quantity_delta > 0 {
+                let unit_cost = movement_cost.unwrap_or(if average_cost > 0 {
+                    average_cost
+                } else {
+                    product_cost
+                });
+                layers.push_back(BackfillCostLayer {
+                    movement_id: Some(movement_id),
+                    source_type: movement_type,
+                    quantity_received: quantity_delta,
+                    quantity_remaining: quantity_delta,
+                    unit_cost,
+                    created_at,
+                });
+            } else if quantity_delta < 0 {
+                let mut to_consume = quantity_delta.checked_abs().ok_or_else(|| {
+                    DbError::InvalidInput("legacy stock movement quantity is invalid".into())
+                })?;
+                while to_consume > 0 {
+                    let Some(layer) = layers.front_mut() else {
+                        break;
+                    };
+                    let consumed = to_consume.min(layer.quantity_remaining);
+                    layer.quantity_remaining -= consumed;
+                    to_consume -= consumed;
+                    if layer.quantity_remaining == 0 {
+                        layers.pop_front();
+                    }
+                }
+            }
+        }
+
+        let reconstructed_quantity = layers.iter().try_fold(0_i64, |total, layer| {
+            total.checked_add(layer.quantity_remaining).ok_or_else(|| {
+                DbError::InvalidInput("legacy stock quantity exceeds the supported limit".into())
+            })
+        })?;
+        if reconstructed_quantity > actual_quantity {
+            let mut excess = reconstructed_quantity - actual_quantity;
+            while excess > 0 {
+                let Some(layer) = layers.front_mut() else {
+                    break;
+                };
+                let removed = excess.min(layer.quantity_remaining);
+                layer.quantity_remaining -= removed;
+                excess -= removed;
+                if layer.quantity_remaining == 0 {
+                    layers.pop_front();
+                }
+            }
+        } else if reconstructed_quantity < actual_quantity {
+            layers.push_back(BackfillCostLayer {
+                movement_id: None,
+                source_type: "legacy_remainder".to_string(),
+                quantity_received: actual_quantity - reconstructed_quantity,
+                quantity_remaining: actual_quantity - reconstructed_quantity,
+                unit_cost: if average_cost > 0 {
+                    average_cost
+                } else {
+                    product_cost
+                },
+                created_at: updated_at,
+            });
+        }
+
+        for layer in layers {
+            conn.execute(
+                "INSERT INTO inventory_cost_layers
+                    (id, business_id, product_id, source_movement_id, source_type,
+                     quantity_received, quantity_remaining, unit_cost, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    business_id,
+                    product_id,
+                    layer.movement_id,
+                    layer.source_type,
+                    layer.quantity_received,
+                    layer.quantity_remaining,
+                    layer.unit_cost,
+                    layer.created_at
+                ],
+            )?;
+        }
     }
     Ok(())
 }
@@ -682,6 +833,7 @@ pub struct PosProduct {
     pub barcode: Option<String>,
     pub base_unit_name: String,
     pub selling_price: i64,
+    pub minimum_selling_price: i64,
     pub quantity_on_hand: i64,
     pub base_unit_allows_decimals: bool,
 }
@@ -727,7 +879,13 @@ pub fn search_pos_products(
     )?;
     let mut stmt = conn.prepare(
         "SELECT p.id, p.name, p.sku, p.barcode, u.name, p.selling_price,
-                COALESCE(ib.quantity_on_hand, 0), u.decimals_ok
+                COALESCE(ib.quantity_on_hand, 0), u.decimals_ok,
+                COALESCE(
+                    (SELECT MAX(icl.unit_cost) FROM inventory_cost_layers icl
+                     WHERE icl.business_id = p.business_id AND icl.product_id = p.id
+                       AND icl.quantity_remaining > 0),
+                    p.purchase_price
+                )
          FROM products p
          JOIN units u ON u.id = p.base_unit_id
          LEFT JOIN inventory_balances ib
@@ -748,6 +906,7 @@ pub fn search_pos_products(
                 barcode: row.get(3)?,
                 base_unit_name: row.get(4)?,
                 selling_price: row.get(5)?,
+                minimum_selling_price: row.get(8)?,
                 quantity_on_hand: row.get(6)?,
                 base_unit_allows_decimals: row.get::<_, i64>(7)? != 0,
             })
@@ -850,11 +1009,11 @@ pub fn checkout_sale(
     let mut total = 0_i64;
 
     for item in items {
-        let product: Option<(String, String, String, i64, i64, i64, i64, i64)> = tx
+        let product: Option<(String, String, String, i64, i64, i64, i64)> = tx
             .query_row(
                 "SELECT p.name, p.sku, u.name, u.decimals_ok, p.selling_price,
                         COALESCE(ib.quantity_on_hand, 0),
-                        COALESCE(ib.average_unit_cost, p.purchase_price), p.is_active
+                        p.is_active
                  FROM products p
                  JOIN units u ON u.id = p.base_unit_id
                  LEFT JOIN inventory_balances ib
@@ -870,7 +1029,6 @@ pub fn checkout_sale(
                         row.get(4)?,
                         row.get(5)?,
                         row.get(6)?,
-                        row.get(7)?,
                     ))
                 },
             )
@@ -882,7 +1040,6 @@ pub fn checkout_sale(
             base_unit_allows_decimals,
             listed_unit_price,
             previous_quantity,
-            unit_cost,
             is_active,
         ) = product.ok_or_else(|| {
             DbError::InvalidInput("a selected product does not belong to this business".to_string())
@@ -902,26 +1059,26 @@ pub fn checkout_sale(
                 "sale price must not be negative".to_string(),
             ));
         }
-        let price_change_reason = item
+        let requested_price_change_reason = item
             .price_change_reason
             .as_deref()
             .map(str::trim)
             .filter(|reason| !reason.is_empty());
-        if price_change_reason.is_some_and(|reason| reason.chars().count() > 500) {
+        if requested_price_change_reason.is_some_and(|reason| reason.chars().count() > 500) {
             return Err(DbError::InvalidInput(
                 "price change reason must be 500 characters or fewer".to_string(),
             ));
         }
         let unit_price = item.selling_price.unwrap_or(listed_unit_price);
-        let price_change_reason = if unit_price == listed_unit_price {
-            None
-        } else {
-            let reason = price_change_reason.ok_or_else(|| {
+        let price_change_reason = if unit_price != listed_unit_price {
+            let reason = requested_price_change_reason.ok_or_else(|| {
                 DbError::InvalidInput(format!(
                     "provide a reason when changing the selling price for {product_name}"
                 ))
             })?;
             Some(reason.to_string())
+        } else {
+            None
         };
         let new_quantity = previous_quantity
             .checked_sub(item.quantity)
@@ -940,7 +1097,20 @@ pub fn checkout_sale(
         total = total.checked_add(line_total).ok_or_else(|| {
             DbError::InvalidInput("sale total exceeds the supported limit".to_string())
         })?;
-        let total_cost = stock_value(item.quantity, unit_cost)?;
+        let (unit_cost, total_cost) =
+            consume_inventory_cost_layers(&tx, business_id, &item.product_id, item.quantity)?;
+        let is_below_cost = line_total < total_cost;
+        let price_change_reason = if is_below_cost {
+            let reason = requested_price_change_reason.ok_or_else(|| {
+                DbError::InvalidInput(format!(
+                    "BELOW_FIFO_COST:{}: sale price for {} is below the cost of the FIFO stock; enter a reason to authorize this loss",
+                    item.product_id, product_name
+                ))
+            })?;
+            Some(reason.to_string())
+        } else {
+            price_change_reason
+        };
         lines.push(SaleLine {
             id: uuid::Uuid::new_v4().to_string(),
             product_id: item.product_id.clone(),
@@ -1778,6 +1948,7 @@ pub fn receive_purchase_delivery(
         let movement_reason = notes
             .map(str::to_string)
             .unwrap_or_else(|| format!("Supplier invoice {invoice_number}"));
+        let movement_id = uuid::Uuid::new_v4().to_string();
         tx.execute(
             "INSERT INTO stock_movements
                 (id, business_id, product_id, movement_type, quantity_delta, unit_cost,
@@ -1786,7 +1957,7 @@ pub fn receive_purchase_delivery(
              VALUES (?1, ?2, ?3, 'purchase_received', ?4, ?5, ?6, ?7, ?8,
                      'purchase_receipt', ?9, ?10, ?11)",
             params![
-                uuid::Uuid::new_v4().to_string(),
+                movement_id,
                 business_id,
                 product_id,
                 item.quantity,
@@ -1798,6 +1969,16 @@ pub fn receive_purchase_delivery(
                 movement_reason,
                 timestamp
             ],
+        )?;
+        add_inventory_cost_layer(
+            &tx,
+            business_id,
+            &product_id,
+            Some(&movement_id),
+            "purchase_received",
+            item.quantity,
+            unit_cost,
+            &timestamp,
         )?;
     }
     let (all_received, any_received): (i64, i64) = tx.query_row(
@@ -1958,6 +2139,11 @@ pub fn create_product(
     if purchase_price < 0 || selling_price < 0 || min_stock_quantity < 0 {
         return Err(DbError::InvalidInput(
             "prices and minimum stock quantity must not be negative".to_string(),
+        ));
+    }
+    if selling_price < purchase_price {
+        return Err(DbError::InvalidInput(
+            "selling price must not be below the product's purchase cost".to_string(),
         ));
     }
     if !matches!(vat_class, "standard" | "zero" | "exempt") {
@@ -2144,6 +2330,12 @@ pub fn update_base_selling_price(
     let (base_unit_id, current_price) = product.ok_or_else(|| {
         DbError::InvalidInput("active product does not belong to this business".to_string())
     })?;
+    let price_floor = selling_price_floor(conn, business_id, product_id)?;
+    if selling_price < price_floor {
+        return Err(DbError::InvalidInput(format!(
+            "selling price must not be below the highest purchase cost of stock on hand"
+        )));
+    }
     if current_price == selling_price {
         tx.commit()?;
         return Ok(());
@@ -2184,6 +2376,27 @@ pub fn update_base_selling_price(
     )?;
     tx.commit()?;
     Ok(())
+}
+
+fn selling_price_floor(
+    conn: &Connection,
+    business_id: &str,
+    product_id: &str,
+) -> Result<i64, DbError> {
+    conn.query_row(
+        "SELECT COALESCE(
+             (SELECT MAX(icl.unit_cost)
+              FROM inventory_cost_layers icl
+              WHERE icl.business_id = p.business_id AND icl.product_id = p.id
+                AND icl.quantity_remaining > 0),
+             p.purchase_price
+         )
+         FROM products p
+         WHERE p.business_id = ?1 AND p.id = ?2",
+        params![business_id, product_id],
+        |row| row.get(0),
+    )
+    .map_err(DbError::from)
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2348,9 +2561,9 @@ pub struct InventoryItem {
     pub sku: String,
     pub base_unit_name: String,
     pub quantity_on_hand: i64,
-    pub average_unit_cost: i64,
     pub stock_value: i64,
     pub selling_price: i64,
+    pub minimum_selling_price: i64,
     pub min_stock_quantity: i64,
     pub base_unit_allows_decimals: bool,
     pub has_movements: bool,
@@ -2360,6 +2573,9 @@ pub struct InventoryItem {
 pub struct InventoryPage {
     pub items: Vec<InventoryItem>,
     pub total_count: i64,
+    pub total_stock_value: i64,
+    pub low_stock_count: i64,
+    pub out_of_stock_count: i64,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2391,6 +2607,170 @@ fn stock_value(quantity: i64, average_unit_cost: i64) -> Result<i64, DbError> {
         / 1000;
     i64::try_from(value)
         .map_err(|_| DbError::InvalidInput("stock valuation exceeds the supported limit".into()))
+}
+
+fn add_inventory_cost_layer(
+    conn: &Connection,
+    business_id: &str,
+    product_id: &str,
+    source_movement_id: Option<&str>,
+    source_type: &str,
+    quantity: i64,
+    unit_cost: i64,
+    created_at: &str,
+) -> Result<(), DbError> {
+    if quantity <= 0 {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO inventory_cost_layers
+            (id, business_id, product_id, source_movement_id, source_type,
+             quantity_received, quantity_remaining, unit_cost, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            product_id,
+            source_movement_id,
+            source_type,
+            quantity,
+            unit_cost,
+            created_at
+        ],
+    )?;
+    Ok(())
+}
+
+fn consume_inventory_cost_layers(
+    conn: &Connection,
+    business_id: &str,
+    product_id: &str,
+    quantity: i64,
+) -> Result<(i64, i64), DbError> {
+    let layers = {
+        let mut stmt = conn.prepare(
+            "SELECT rowid, id, quantity_remaining, unit_cost
+             FROM inventory_cost_layers
+             WHERE business_id = ?1 AND product_id = ?2 AND quantity_remaining > 0
+             ORDER BY created_at, rowid",
+        )?;
+        stmt.query_map(params![business_id, product_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut remaining = quantity;
+    let mut raw_cost = 0_i128;
+    for (rowid, id, available, unit_cost) in layers {
+        if remaining == 0 {
+            break;
+        }
+        let consumed = remaining.min(available);
+        raw_cost = raw_cost
+            .checked_add(
+                i128::from(consumed)
+                    .checked_mul(i128::from(unit_cost))
+                    .ok_or_else(|| {
+                        DbError::InvalidInput(
+                            "FIFO stock valuation exceeds the supported limit".into(),
+                        )
+                    })?,
+            )
+            .ok_or_else(|| {
+                DbError::InvalidInput("FIFO stock valuation exceeds the supported limit".into())
+            })?;
+        let updated = conn.execute(
+            "UPDATE inventory_cost_layers
+             SET quantity_remaining = ?1
+             WHERE rowid = ?2 AND id = ?3 AND business_id = ?4
+               AND product_id = ?5 AND quantity_remaining = ?6",
+            params![
+                available - consumed,
+                rowid,
+                id,
+                business_id,
+                product_id,
+                available
+            ],
+        )?;
+        if updated != 1 {
+            return Err(DbError::InvalidInput(
+                "stock cost layers changed while recording the transaction".into(),
+            ));
+        }
+        remaining -= consumed;
+    }
+    if remaining > 0 {
+        return Err(DbError::InvalidInput(
+            "stock cost layers do not cover the quantity on hand; correct inventory before continuing"
+                .into(),
+        ));
+    }
+    let total_cost = i64::try_from(
+        raw_cost.checked_add(500).ok_or_else(|| {
+            DbError::InvalidInput("FIFO stock valuation exceeds the supported limit".into())
+        })? / 1000,
+    )
+    .map_err(|_| {
+        DbError::InvalidInput("FIFO stock valuation exceeds the supported limit".into())
+    })?;
+    let unit_cost = i64::try_from(
+        raw_cost
+            .checked_add(i128::from(quantity / 2))
+            .ok_or_else(|| {
+                DbError::InvalidInput("FIFO stock valuation exceeds the supported limit".into())
+            })?
+            / i128::from(quantity),
+    )
+    .map_err(|_| DbError::InvalidInput("FIFO unit cost exceeds the supported limit".into()))?;
+    Ok((unit_cost, total_cost))
+}
+
+fn inventory_layers_summary(
+    conn: &Connection,
+    business_id: &str,
+    product_id: &str,
+) -> Result<(i64, i64, Option<i64>), DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT quantity_remaining, unit_cost
+         FROM inventory_cost_layers
+         WHERE business_id = ?1 AND product_id = ?2 AND quantity_remaining > 0",
+    )?;
+    let mut rows = stmt.query_map(params![business_id, product_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let (quantity, raw_value, max_unit_cost) = rows.try_fold(
+        (0_i64, 0_i128, None),
+        |(total_quantity, total_value, max_cost), row| {
+            let (quantity, cost) = row?;
+            let layer_value = i128::from(quantity)
+                .checked_mul(i128::from(cost))
+                .ok_or_else(|| {
+                    DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+                })?;
+            Ok::<_, DbError>((
+                total_quantity.checked_add(quantity).ok_or_else(|| {
+                    DbError::InvalidInput("stock quantity exceeds the supported limit".into())
+                })?,
+                total_value.checked_add(layer_value).ok_or_else(|| {
+                    DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+                })?,
+                Some(max_cost.map_or(cost, |current: i64| current.max(cost))),
+            ))
+        },
+    )?;
+    let stock_value = i64::try_from(
+        raw_value.checked_add(500).ok_or_else(|| {
+            DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+        })? / 1000,
+    )
+    .map_err(|_| DbError::InvalidInput("stock valuation exceeds the supported limit".into()))?;
+    Ok((quantity, stock_value, max_unit_cost))
 }
 
 pub fn list_inventory(
@@ -2437,9 +2817,11 @@ pub fn list_inventory(
     )?;
     let mut stmt = conn.prepare(
         "SELECT p.id, p.name, p.sku, u.name,
-                COALESCE(ib.quantity_on_hand, 0), COALESCE(ib.average_unit_cost, p.purchase_price),
+                COALESCE(ib.quantity_on_hand, 0),
                 p.selling_price, p.min_stock_quantity, u.decimals_ok,
-                EXISTS(SELECT 1 FROM stock_movements sm WHERE sm.product_id = p.id)
+                EXISTS(SELECT 1 FROM stock_movements sm
+                       WHERE sm.business_id = p.business_id AND sm.product_id = p.id),
+                p.purchase_price
          FROM products p
          JOIN units u ON u.id = p.base_unit_id
          LEFT JOIN inventory_balances ib
@@ -2460,28 +2842,91 @@ pub fn list_inventory(
     )?;
     let mut items = stmt
         .query_map(params![business_id, pattern, limit, offset], |row| {
-            let quantity_on_hand: i64 = row.get(4)?;
-            let average_unit_cost: i64 = row.get(5)?;
             Ok(InventoryItem {
                 product_id: row.get(0)?,
                 name: row.get(1)?,
                 sku: row.get(2)?,
                 base_unit_name: row.get(3)?,
-                quantity_on_hand,
-                average_unit_cost,
+                quantity_on_hand: row.get(4)?,
                 stock_value: 0,
-                selling_price: row.get(6)?,
-                min_stock_quantity: row.get(7)?,
-                base_unit_allows_decimals: row.get::<_, i64>(8)? != 0,
-                has_movements: row.get(9)?,
+                selling_price: row.get(5)?,
+                minimum_selling_price: row.get(9)?,
+                min_stock_quantity: row.get(6)?,
+                base_unit_allows_decimals: row.get::<_, i64>(7)? != 0,
+                has_movements: row.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
     for item in &mut items {
-        item.stock_value = stock_value(item.quantity_on_hand, item.average_unit_cost)?;
+        let (layer_quantity, stock_value, max_unit_cost) =
+            inventory_layers_summary(conn, business_id, &item.product_id)?;
+        if layer_quantity != item.quantity_on_hand {
+            return Err(DbError::InvalidInput(format!(
+                "inventory quantity and purchase-cost layers do not match for {}",
+                item.name
+            )));
+        }
+        item.stock_value = stock_value;
+        if let Some(max_unit_cost) = max_unit_cost {
+            item.minimum_selling_price = max_unit_cost;
+        }
     }
 
-    Ok(InventoryPage { items, total_count })
+    let total_stock_value = {
+        let mut stmt = conn.prepare(
+            "SELECT quantity_remaining, unit_cost
+             FROM inventory_cost_layers WHERE business_id = ?1 AND quantity_remaining > 0",
+        )?;
+        let mut rows = stmt.query_map(params![business_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let raw_value = rows.try_fold(0_i128, |total, row| {
+            let (quantity, cost) = row?;
+            let layer_value = i128::from(quantity)
+                .checked_mul(i128::from(cost))
+                .ok_or_else(|| {
+                    DbError::InvalidInput(
+                        "business stock valuation exceeds the supported limit".into(),
+                    )
+                })?;
+            total.checked_add(layer_value).ok_or_else(|| {
+                DbError::InvalidInput("business stock valuation exceeds the supported limit".into())
+            })
+        })?;
+        i64::try_from(
+            raw_value.checked_add(500).ok_or_else(|| {
+                DbError::InvalidInput("business stock valuation exceeds the supported limit".into())
+            })? / 1000,
+        )
+        .map_err(|_| {
+            DbError::InvalidInput("business stock valuation exceeds the supported limit".into())
+        })?
+    };
+    let (low_stock_count, out_of_stock_count): (i64, i64) = conn.query_row(
+        "SELECT
+             SUM(CASE WHEN COALESCE(ib.quantity_on_hand, 0) > 0
+                       AND COALESCE(ib.quantity_on_hand, 0) <= p.min_stock_quantity
+                      THEN 1 ELSE 0 END),
+             SUM(CASE WHEN COALESCE(ib.quantity_on_hand, 0) = 0 THEN 1 ELSE 0 END)
+         FROM products p
+         LEFT JOIN inventory_balances ib ON ib.product_id = p.id AND ib.business_id = p.business_id
+         WHERE p.business_id = ?1 AND p.is_active = 1",
+        params![business_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+            ))
+        },
+    )?;
+
+    Ok(InventoryPage {
+        items,
+        total_count,
+        total_stock_value,
+        low_stock_count,
+        out_of_stock_count,
+    })
 }
 
 pub fn list_stock_movements(
@@ -2609,6 +3054,16 @@ pub fn set_opening_stock(
             timestamp
         ],
     )?;
+    add_inventory_cost_layer(
+        &tx,
+        business_id,
+        product_id,
+        Some(&id),
+        "opening_stock",
+        quantity,
+        unit_cost,
+        &timestamp,
+    )?;
     tx.commit()?;
 
     Ok(StockMovement {
@@ -2684,13 +3139,34 @@ pub fn correct_stock(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let (previous_quantity, average_unit_cost) = existing_balance.unwrap_or((0, product_unit_cost));
+    let (previous_quantity, stored_average_unit_cost) =
+        existing_balance.unwrap_or((0, product_unit_cost));
+    let average_unit_cost = if previous_quantity == 0 {
+        product_unit_cost
+    } else {
+        stored_average_unit_cost
+    };
     if target_quantity == previous_quantity {
         return Err(DbError::InvalidInput(
             "corrected quantity must differ from the current stock".to_string(),
         ));
     }
     let quantity_delta = target_quantity - previous_quantity;
+    let (movement_unit_cost, total_cost) = if quantity_delta > 0 {
+        (
+            average_unit_cost,
+            stock_value(quantity_delta, average_unit_cost)?,
+        )
+    } else {
+        consume_inventory_cost_layers(
+            &tx,
+            business_id,
+            product_id,
+            quantity_delta.checked_abs().ok_or_else(|| {
+                DbError::InvalidInput("corrected quantity exceeds the supported limit".into())
+            })?,
+        )?
+    };
 
     tx.execute(
         "INSERT INTO inventory_balances
@@ -2710,21 +3186,34 @@ pub fn correct_stock(
     )?;
     tx.execute(
         "INSERT INTO stock_movements
-            (id, business_id, product_id, movement_type, quantity_delta, unit_cost,
+            (id, business_id, product_id, movement_type, quantity_delta, unit_cost, total_cost,
              previous_quantity, new_quantity, reference_type, reference_id, reason, created_at)
-         VALUES (?1, ?2, ?3, 'stock_correction', ?4, ?5, ?6, ?7, 'product', ?3, ?8, ?9)",
+         VALUES (?1, ?2, ?3, 'stock_correction', ?4, ?5, ?6, ?7, ?8, 'product', ?3, ?9, ?10)",
         params![
             id,
             business_id,
             product_id,
             quantity_delta,
-            average_unit_cost,
+            movement_unit_cost,
+            total_cost,
             previous_quantity,
             target_quantity,
             reason,
             timestamp
         ],
     )?;
+    if quantity_delta > 0 {
+        add_inventory_cost_layer(
+            &tx,
+            business_id,
+            product_id,
+            Some(&id),
+            "stock_correction",
+            quantity_delta,
+            movement_unit_cost,
+            &timestamp,
+        )?;
+    }
     tx.commit()?;
 
     Ok(StockMovement {
@@ -2734,8 +3223,8 @@ pub fn correct_stock(
         product_name,
         movement_type: "stock_correction".to_string(),
         quantity_delta,
-        unit_cost: Some(average_unit_cost),
-        total_cost: None,
+        unit_cost: Some(movement_unit_cost),
+        total_cost: Some(total_cost),
         previous_quantity,
         new_quantity: target_quantity,
         reference_type: Some("product".to_string()),
@@ -2823,6 +3312,16 @@ pub fn receive_stock_with_selling_price(
         .ok_or_else(|| {
             DbError::InvalidInput("active product does not belong to this business".to_string())
         })?;
+    if let Some(price) = new_selling_price {
+        let price_floor =
+            selling_price_floor(&tx, business_id, product_id)?.max(received_unit_cost);
+        if price < price_floor {
+            return Err(DbError::InvalidInput(
+                "selling price must not be below the highest purchase cost of stock on hand"
+                    .to_string(),
+            ));
+        }
+    }
     if base_unit_allows_decimals == 0 && quantity % 1000 != 0 {
         return Err(DbError::InvalidInput(
             "received quantity must be a whole base unit".to_string(),
@@ -2904,6 +3403,16 @@ pub fn receive_stock_with_selling_price(
             reason,
             timestamp
         ],
+    )?;
+    add_inventory_cost_layer(
+        &tx,
+        business_id,
+        product_id,
+        Some(&id),
+        "purchase_received",
+        quantity,
+        received_unit_cost,
+        &timestamp,
     )?;
     if let Some(new_selling_price) =
         new_selling_price.filter(|price| *price != current_selling_price)
@@ -3045,6 +3554,111 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn inventory_cost_layer_migration_reconstructs_fifo_and_uses_average_for_unmatched_stock() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pragmas(&conn).unwrap();
+        applied_versions(&conn).unwrap();
+        for (version, name, sql) in MIGRATIONS.iter().take(MIGRATIONS.len() - 1) {
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at)
+                 VALUES (?1, ?2, ?3)",
+                params![version, name, now_utc()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let reconstructed = create_test_product(&conn, &business.id, "FIFO-MIGRATION-01");
+        let unmatched = create_test_product(&conn, &business.id, "FIFO-MIGRATION-02");
+        let timestamp = now_utc();
+        conn.execute(
+            "INSERT INTO inventory_balances
+                (product_id, business_id, quantity_on_hand, average_unit_cost, updated_at)
+             VALUES (?1, ?2, 2500, 6500, ?3), (?4, ?2, 2000, 7000, ?3)",
+            params![reconstructed.id, business.id, timestamp, unmatched.id],
+        )
+        .unwrap();
+        for (id, product_id, movement_type, quantity, unit_cost, previous, new, created_at) in [
+            (
+                "fifo-opening",
+                reconstructed.id.as_str(),
+                "opening_stock",
+                3000,
+                5000,
+                0,
+                3000,
+                "2026-01-01T00:00:00Z",
+            ),
+            (
+                "fifo-receipt",
+                reconstructed.id.as_str(),
+                "purchase_received",
+                3000,
+                8000,
+                3000,
+                6000,
+                "2026-01-02T00:00:00Z",
+            ),
+            (
+                "fifo-sale",
+                reconstructed.id.as_str(),
+                "sale",
+                -3500,
+                6500,
+                6000,
+                2500,
+                "2026-01-03T00:00:00Z",
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO stock_movements
+                    (id, business_id, product_id, movement_type, quantity_delta, unit_cost,
+                     previous_quantity, new_quantity, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    id,
+                    business.id,
+                    product_id,
+                    movement_type,
+                    quantity,
+                    unit_cost,
+                    previous,
+                    new,
+                    created_at
+                ],
+            )
+            .unwrap();
+        }
+
+        run_migrations(&mut conn).unwrap();
+
+        let reconstructed_layer: (i64, i64, String) = conn
+            .query_row(
+                "SELECT quantity_remaining, unit_cost, source_type
+                 FROM inventory_cost_layers WHERE product_id = ?1",
+                params![reconstructed.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            reconstructed_layer,
+            (2500, 8000, "purchase_received".into())
+        );
+        let fallback_layer: (i64, i64, String) = conn
+            .query_row(
+                "SELECT quantity_remaining, unit_cost, source_type
+                 FROM inventory_cost_layers WHERE product_id = ?1",
+                params![unmatched.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(fallback_layer, (2000, 7000, "legacy_remainder".into()));
     }
 
     #[test]
@@ -3479,6 +4093,25 @@ mod tests {
             None,
             None,
             "Cement",
+            "CEM-2",
+            None,
+            None,
+            None,
+            None,
+            "sys-unit-bag",
+            10_000,
+            9_999,
+            0,
+            "standard",
+        );
+        assert!(matches!(result, Err(DbError::InvalidInput(_))));
+
+        let result = create_product(
+            &conn,
+            &business.id,
+            None,
+            None,
+            "Cement",
             "CEM-1",
             None,
             None,
@@ -3902,6 +4535,97 @@ mod tests {
     }
 
     #[test]
+    fn fifo_valuation_uses_remaining_purchase_cost_and_requires_reason_for_losses() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "FIFO-SALE-01");
+        set_opening_stock(&conn, &business.id, &product.id, 1_000, None).unwrap();
+        receive_stock(
+            &conn,
+            &business.id,
+            &product.id,
+            1_000,
+            20_000,
+            "FIFO-RECEIPT-01",
+            None,
+        )
+        .unwrap();
+
+        let inventory = list_inventory(&conn, &business.id, Some("FIFO-SALE-01"), 0, 20).unwrap();
+        assert_eq!(inventory.items[0].stock_value, 30_000);
+        assert_eq!(inventory.items[0].minimum_selling_price, 20_000);
+        assert_eq!(inventory.total_stock_value, 30_000);
+        assert!(update_base_selling_price(&conn, &business.id, &product.id, 19_999).is_err());
+
+        let first_sale = checkout_sale(
+            &conn,
+            &business.id,
+            &[SaleItemInput {
+                product_id: product.id.clone(),
+                quantity: 1_000,
+                selling_price: None,
+                price_change_reason: None,
+            }],
+            "cash",
+        )
+        .unwrap();
+        assert_eq!(first_sale.total, 12_000);
+        let remaining_inventory =
+            list_inventory(&conn, &business.id, Some("FIFO-SALE-01"), 0, 20).unwrap();
+        assert_eq!(remaining_inventory.items[0].stock_value, 20_000);
+
+        assert!(matches!(
+            checkout_sale(
+                &conn,
+                &business.id,
+                &[SaleItemInput {
+                    product_id: product.id.clone(),
+                    quantity: 1_000,
+                    selling_price: None,
+                    price_change_reason: None,
+                }],
+                "cash"
+            ),
+            Err(DbError::InvalidInput(message)) if message.contains("BELOW_FIFO_COST:")
+        ));
+        let after_rejected_sale =
+            list_inventory(&conn, &business.id, Some("FIFO-SALE-01"), 0, 20).unwrap();
+        assert_eq!(after_rejected_sale.items[0].quantity_on_hand, 1_000);
+        assert_eq!(after_rejected_sale.items[0].stock_value, 20_000);
+
+        let loss_sale = checkout_sale(
+            &conn,
+            &business.id,
+            &[SaleItemInput {
+                product_id: product.id.clone(),
+                quantity: 1_000,
+                selling_price: None,
+                price_change_reason: Some("Approved clearance".to_string()),
+            }],
+            "cash",
+        )
+        .unwrap();
+        let (unit_cost, total_cost, reason): (i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT unit_cost, total_cost, price_change_reason
+                 FROM sale_items WHERE sale_id = ?1",
+                params![loss_sale.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(unit_cost, 20_000);
+        assert_eq!(total_cost, 20_000);
+        assert_eq!(reason.as_deref(), Some("Approved clearance"));
+        assert_eq!(
+            list_inventory(&conn, &business.id, Some("FIFO-SALE-01"), 0, 20)
+                .unwrap()
+                .items[0]
+                .stock_value,
+            0
+        );
+    }
+
+    #[test]
     fn checkout_sale_rejects_insufficient_stock_and_invalid_payment_without_writes() {
         let conn = open_in_memory().unwrap();
         let business = create_business(&conn, "Hardware shop", None).unwrap();
@@ -4130,7 +4854,7 @@ mod tests {
         assert_eq!(movement.reason.as_deref(), Some("Initial stock count"));
         assert_eq!(inventory.total_count, 1);
         assert_eq!(inventory.items[0].quantity_on_hand, 125_000);
-        assert_eq!(inventory.items[0].average_unit_cost, 10_000);
+        assert_eq!(inventory.items[0].minimum_selling_price, 10_000);
         assert_eq!(inventory.items[0].stock_value, 1_250_000);
         assert_eq!(inventory.items[0].min_stock_quantity, 5_000);
         assert!(!inventory.items[0].base_unit_allows_decimals);
@@ -4233,7 +4957,7 @@ mod tests {
         assert_eq!(correction.previous_quantity, 8_000);
         assert_eq!(correction.new_quantity, 6_000);
         assert_eq!(inventory.items[0].quantity_on_hand, 6_000);
-        assert_eq!(inventory.items[0].average_unit_cost, 10_000);
+        assert_eq!(inventory.items[0].minimum_selling_price, 10_000);
         assert_eq!(inventory.items[0].stock_value, 60_000);
         assert_eq!(movements.len(), 2);
         assert!(
@@ -4655,7 +5379,7 @@ mod tests {
         assert_eq!(receipt.reference_id.as_deref(), Some("INV-2026-0042"));
         assert_eq!(receipt.reason.as_deref(), Some("Partial delivery"));
         assert_eq!(inventory.items[0].quantity_on_hand, 8_000);
-        assert_eq!(inventory.items[0].average_unit_cost, 13_750);
+        assert_eq!(inventory.items[0].minimum_selling_price, 20_000);
         assert_eq!(inventory.items[0].stock_value, 110_000);
         assert_eq!(movements.len(), 2);
         assert!(movements.iter().any(|movement| movement.id == opening.id));
