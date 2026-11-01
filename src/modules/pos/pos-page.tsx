@@ -55,6 +55,8 @@ interface PosProductPageData {
 interface CartItem {
   product: PosProduct;
   quantity: string;
+  sellingPrice: string;
+  priceChangeReason: string;
 }
 
 interface SaleReceipt {
@@ -68,8 +70,10 @@ interface SaleReceipt {
     sku: string;
     quantity: number;
     unit_name: string;
+    listed_unit_price: number;
     unit_price: number;
     line_total: number;
+    price_change_reason: string | null;
   }[];
 }
 
@@ -90,6 +94,26 @@ function parseQuantity(value: string, allowsDecimals: boolean): bigint | null {
   return scaled <= MAX_SAFE_INTEGER ? scaled : null;
 }
 
+function parseMoney(value: string): bigint | null {
+  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(value);
+  if (!match) {
+    return null;
+  }
+  const fraction = (match[2] ?? "").padEnd(2, "0");
+  const scaled = BigInt(match[1]) * MONEY_SCALE + BigInt(fraction || "0");
+  return scaled <= MAX_SAFE_INTEGER ? scaled : null;
+}
+
+function moneyInputValue(scaledAmount: number): string {
+  if (!Number.isSafeInteger(scaledAmount) || scaledAmount < 0) {
+    return "";
+  }
+  const amount = BigInt(scaledAmount);
+  const whole = amount / MONEY_SCALE;
+  const fraction = amount % MONEY_SCALE;
+  return fraction === 0n ? whole.toString() : `${whole}.${fraction.toString().padStart(2, "0")}`;
+}
+
 function formatMoney(scaledAmount: bigint): string {
   const whole = scaledAmount / MONEY_SCALE;
   const fraction = scaledAmount % MONEY_SCALE;
@@ -104,20 +128,20 @@ function formatProductPrice(scaledAmount: number): string {
     : "Invalid price";
 }
 
-function lineTotal(product: PosProduct, quantity: string): bigint | null {
+function lineTotal(product: PosProduct, quantity: string, sellingPrice: string): bigint | null {
   const scaledQuantity = parseQuantity(quantity, product.base_unit_allows_decimals);
+  const scaledPrice = parseMoney(sellingPrice);
   if (
     scaledQuantity === null ||
     scaledQuantity === 0n ||
     !Number.isSafeInteger(product.quantity_on_hand) ||
     product.quantity_on_hand < 0 ||
     scaledQuantity > BigInt(product.quantity_on_hand) ||
-    !Number.isSafeInteger(product.selling_price) ||
-    product.selling_price < 0
+    scaledPrice === null
   ) {
     return null;
   }
-  return (scaledQuantity * BigInt(product.selling_price) + 500n) / QUANTITY_SCALE;
+  return (scaledQuantity * scaledPrice + 500n) / QUANTITY_SCALE;
 }
 
 function errorText(cause: unknown): string {
@@ -142,10 +166,21 @@ export function PosPage() {
 
   const pageCount = Math.ceil(totalCount / PAGE_SIZE);
   const cartTotal = useMemo(
-    () => cart.reduce((total, item) => total + (lineTotal(item.product, item.quantity) ?? 0n), 0n),
+    () => cart.reduce(
+      (total, item) => total + (lineTotal(item.product, item.quantity, item.sellingPrice) ?? 0n),
+      0n,
+    ),
     [cart],
   );
-  const hasInvalidCartItem = cart.some((item) => lineTotal(item.product, item.quantity) === null);
+  const hasInvalidCartItem = cart.some((item) => {
+    const price = parseMoney(item.sellingPrice);
+    const listedPrice = Number.isSafeInteger(item.product.selling_price) && item.product.selling_price >= 0
+      ? BigInt(item.product.selling_price)
+      : null;
+    const hasPriceChange = price !== null && price !== listedPrice;
+    return lineTotal(item.product, item.quantity, item.sellingPrice) === null ||
+      (hasPriceChange && !item.priceChangeReason.trim());
+  });
 
   useEffect(() => {
     let active = true;
@@ -214,6 +249,10 @@ export function PosPage() {
 
   function addToCart(product: PosProduct) {
     setError(null);
+    if (!Number.isSafeInteger(product.selling_price) || product.selling_price < 0) {
+      setError(`Selling price is outside the supported range for ${product.name}.`);
+      return;
+    }
     if (!Number.isSafeInteger(product.quantity_on_hand) || product.quantity_on_hand < 0) {
       setError("Stock quantity is outside the supported range.");
       return;
@@ -235,13 +274,18 @@ export function PosPage() {
       ));
       return;
     }
-    setCart([...cart, { product, quantity: "1" }]);
+    setCart([...cart, {
+      product,
+      quantity: "1",
+      sellingPrice: moneyInputValue(product.selling_price),
+      priceChangeReason: "",
+    }]);
   }
 
-  function updateCartQuantity(productId: string, quantity: string) {
+  function updateCartItem(productId: string, patch: Partial<Pick<CartItem, "quantity" | "sellingPrice" | "priceChangeReason">>) {
     setCart((current) =>
       current.map((item) =>
-        item.product.id === productId ? { ...item, quantity } : item,
+        item.product.id === productId ? { ...item, ...patch } : item,
       ),
     );
   }
@@ -255,14 +299,34 @@ export function PosPage() {
       return;
     }
 
-    const items: { productId: string; quantity: number }[] = [];
+    const items: {
+      productId: string;
+      quantity: number;
+      sellingPrice: number | null;
+      priceChangeReason: string | null;
+    }[] = [];
     for (const item of cart) {
       const quantity = parseQuantity(item.quantity, item.product.base_unit_allows_decimals);
-      if (quantity === null) {
-        setError(`Enter a valid quantity for ${item.product.name}.`);
+      const sellingPrice = parseMoney(item.sellingPrice);
+      if (quantity === null || sellingPrice === null) {
+        setError(`Enter a valid quantity and selling price for ${item.product.name}.`);
         return;
       }
-      items.push({ productId: item.product.id, quantity: Number(quantity) });
+      if (!Number.isSafeInteger(item.product.selling_price) || item.product.selling_price < 0) {
+        setError(`The listed price is outside the supported range for ${item.product.name}.`);
+        return;
+      }
+      const priceChanged = sellingPrice !== BigInt(item.product.selling_price);
+      if (priceChanged && !item.priceChangeReason.trim()) {
+        setError(`Enter a reason for changing the selling price of ${item.product.name}.`);
+        return;
+      }
+      items.push({
+        productId: item.product.id,
+        quantity: Number(quantity),
+        sellingPrice: priceChanged ? Number(sellingPrice) : null,
+        priceChangeReason: priceChanged ? item.priceChangeReason.trim() : null,
+      });
     }
 
     setError(null);
@@ -357,6 +421,11 @@ export function PosPage() {
                     <p className="text-sm text-muted-foreground">
                       {formatQuantity(item.quantity)} {item.unit_name} × {formatProductPrice(item.unit_price)}
                     </p>
+                    {item.unit_price !== item.listed_unit_price ? (
+                      <p className="text-xs text-muted-foreground">
+                        Price adjusted from {formatProductPrice(item.listed_unit_price)} · Reason: {item.price_change_reason}
+                      </p>
+                    ) : null}
                   </div>
                   <p className="shrink-0 font-medium">{formatProductPrice(item.line_total)}</p>
                 </div>
@@ -469,14 +538,19 @@ export function PosPage() {
             ) : (
               <div className="space-y-3">
                 {cart.map((item) => {
-                  const total = lineTotal(item.product, item.quantity);
+                  const total = lineTotal(item.product, item.quantity, item.sellingPrice);
+                  const parsedPrice = parseMoney(item.sellingPrice);
+                  const listedPrice = Number.isSafeInteger(item.product.selling_price) && item.product.selling_price >= 0
+                    ? BigInt(item.product.selling_price)
+                    : null;
+                  const priceChanged = parsedPrice !== null && parsedPrice !== listedPrice;
                   return (
                     <div key={item.product.id} className="space-y-2 rounded-lg border p-3">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <p className="truncate font-medium">{item.product.name}</p>
                           <p className="text-xs text-muted-foreground">
-                            {formatProductPrice(item.product.selling_price)} per {item.product.base_unit_name}
+                            Default price: {formatProductPrice(item.product.selling_price)} per {item.product.base_unit_name}
                           </p>
                         </div>
                         <Button
@@ -490,21 +564,53 @@ export function PosPage() {
                         </Button>
                       </div>
                       <div className="flex items-end justify-between gap-3">
-                        <div className="w-32 space-y-1">
-                          <Label htmlFor={`pos-quantity-${item.product.id}`} className="text-xs">
-                            Quantity ({item.product.base_unit_name})
-                          </Label>
-                          <Input
-                            id={`pos-quantity-${item.product.id}`}
-                            type="number"
-                            min={item.product.base_unit_allows_decimals ? "0.001" : "1"}
-                            max={formatQuantity(item.product.quantity_on_hand)}
-                            step={item.product.base_unit_allows_decimals ? "0.001" : "1"}
-                            value={item.quantity}
-                            onChange={(event) => updateCartQuantity(item.product.id, event.target.value)}
-                          />
+                        <div className="grid flex-1 gap-3 sm:grid-cols-2">
+                          <div className="space-y-1">
+                            <Label htmlFor={`pos-quantity-${item.product.id}`} className="text-xs">
+                              Quantity ({item.product.base_unit_name})
+                            </Label>
+                            <Input
+                              id={`pos-quantity-${item.product.id}`}
+                              type="number"
+                              min={item.product.base_unit_allows_decimals ? "0.001" : "1"}
+                              max={formatQuantity(item.product.quantity_on_hand)}
+                              step={item.product.base_unit_allows_decimals ? "0.001" : "1"}
+                              value={item.quantity}
+                              onChange={(event) => updateCartItem(item.product.id, { quantity: event.target.value })}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <Label htmlFor={`pos-price-${item.product.id}`} className="text-xs">
+                              Selling price per {item.product.base_unit_name} (RWF)
+                            </Label>
+                            <Input
+                              id={`pos-price-${item.product.id}`}
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.sellingPrice}
+                              onChange={(event) => updateCartItem(item.product.id, { sellingPrice: event.target.value })}
+                            />
+                          </div>
                         </div>
-                        <p className="font-semibold">{total === null ? "Check quantity / stock" : formatMoney(total)}</p>
+                        {priceChanged ? (
+                          <div className="space-y-1">
+                            <Label htmlFor={`pos-price-reason-${item.product.id}`} className="text-xs">
+                              Reason for changing the price (required)
+                            </Label>
+                            <Input
+                              id={`pos-price-reason-${item.product.id}`}
+                              maxLength={500}
+                              required
+                              value={item.priceChangeReason}
+                              onChange={(event) => updateCartItem(item.product.id, { priceChangeReason: event.target.value })}
+                              placeholder="e.g. Customer negotiated"
+                            />
+                          </div>
+                        ) : null}
+                        <p className="text-right font-semibold">
+                          {total === null ? "Check quantity / price / reason" : formatMoney(total)}
+                        </p>
                       </div>
                     </div>
                   );
@@ -547,7 +653,7 @@ export function PosPage() {
               </p>
               {hasInvalidCartItem ? (
                 <p role="alert" className="text-xs text-destructive">
-                  Enter valid quantities to calculate all cart totals.
+                  Check each quantity and price; any changed price needs a reason before checkout.
                 </p>
               ) : null}
             </div>

@@ -31,6 +31,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "007_suppliers",
         include_str!("../migrations/007_suppliers.sql"),
     ),
+    (
+        8,
+        "008_sale_price_overrides",
+        include_str!("../migrations/008_sale_price_overrides.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -746,6 +751,8 @@ pub fn search_pos_products(
 pub struct SaleItemInput {
     pub product_id: String,
     pub quantity: i64,
+    pub selling_price: Option<i64>,
+    pub price_change_reason: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -754,8 +761,10 @@ pub struct SaleReceiptItem {
     pub sku: String,
     pub quantity: i64,
     pub unit_name: String,
+    pub listed_unit_price: i64,
     pub unit_price: i64,
     pub line_total: i64,
+    pub price_change_reason: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -775,8 +784,10 @@ struct SaleLine {
     sku: String,
     quantity: i64,
     unit_name: String,
+    listed_unit_price: i64,
     unit_price: i64,
     line_total: i64,
+    price_change_reason: Option<String>,
     unit_cost: i64,
     total_cost: i64,
     previous_quantity: i64,
@@ -859,7 +870,7 @@ pub fn checkout_sale(
             sku,
             unit_name,
             base_unit_allows_decimals,
-            unit_price,
+            listed_unit_price,
             previous_quantity,
             unit_cost,
             is_active,
@@ -876,6 +887,32 @@ pub fn checkout_sale(
                 "this product only allows whole base units".to_string(),
             ));
         }
+        if item.selling_price.is_some_and(|price| price < 0) {
+            return Err(DbError::InvalidInput(
+                "sale price must not be negative".to_string(),
+            ));
+        }
+        let price_change_reason = item
+            .price_change_reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty());
+        if price_change_reason.is_some_and(|reason| reason.chars().count() > 500) {
+            return Err(DbError::InvalidInput(
+                "price change reason must be 500 characters or fewer".to_string(),
+            ));
+        }
+        let unit_price = item.selling_price.unwrap_or(listed_unit_price);
+        let price_change_reason = if unit_price == listed_unit_price {
+            None
+        } else {
+            let reason = price_change_reason.ok_or_else(|| {
+                DbError::InvalidInput(format!(
+                    "provide a reason when changing the selling price for {product_name}"
+                ))
+            })?;
+            Some(reason.to_string())
+        };
         let new_quantity = previous_quantity
             .checked_sub(item.quantity)
             .filter(|quantity| *quantity >= 0)
@@ -901,8 +938,10 @@ pub fn checkout_sale(
             sku,
             quantity: item.quantity,
             unit_name,
+            listed_unit_price,
             unit_price,
             line_total,
+            price_change_reason,
             unit_cost,
             total_cost,
             previous_quantity,
@@ -940,8 +979,9 @@ pub fn checkout_sale(
         tx.execute(
             "INSERT INTO sale_items
                 (id, sale_id, business_id, product_id, product_name, sku, quantity,
-                 unit_name, unit_price, line_total, unit_cost, total_cost)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 unit_name, listed_unit_price, unit_price, line_total, price_change_reason,
+                 unit_cost, total_cost)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 line.id,
                 sale_id,
@@ -951,8 +991,10 @@ pub fn checkout_sale(
                 line.sku,
                 line.quantity,
                 line.unit_name,
+                line.listed_unit_price,
                 line.unit_price,
                 line.line_total,
+                line.price_change_reason,
                 line.unit_cost,
                 line.total_cost
             ],
@@ -982,8 +1024,10 @@ pub fn checkout_sale(
             sku: line.sku.clone(),
             quantity: line.quantity,
             unit_name: line.unit_name.clone(),
+            listed_unit_price: line.listed_unit_price,
             unit_price: line.unit_price,
             line_total: line.line_total,
+            price_change_reason: line.price_change_reason.clone(),
         });
     }
     tx.execute(
@@ -2283,6 +2327,63 @@ mod tests {
     }
 
     #[test]
+    fn sale_price_override_migration_backfills_listed_prices_for_existing_sales() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pragmas(&conn).unwrap();
+        applied_versions(&conn).unwrap();
+        for (version, name, sql) in MIGRATIONS.iter().take(7) {
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at)
+                 VALUES (?1, ?2, ?3)",
+                params![version, name, now_utc()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "SALE-PRICE-MIGRATION-01");
+        let timestamp = now_utc();
+        conn.execute(
+            "INSERT INTO sales
+                (id, business_id, transaction_number, subtotal, discount, total, created_at)
+             VALUES ('legacy-sale', ?1, 'SALE-LEGACY-01', 12000, 0, 12000, ?2)",
+            params![business.id, timestamp],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sale_items
+                (id, sale_id, business_id, product_id, product_name, sku, quantity,
+                 unit_name, unit_price, line_total, unit_cost, total_cost)
+             VALUES ('legacy-sale-item', 'legacy-sale', ?1, ?2, ?3, ?4, 1000,
+                     ?5, 12000, 12000, 10000, 10000)",
+            params![
+                business.id,
+                product.id,
+                product.name,
+                product.sku,
+                product.base_unit_name
+            ],
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        let (listed_price, reason): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT listed_unit_price, price_change_reason
+                 FROM sale_items WHERE id = 'legacy-sale-item'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(listed_price, 12_000);
+        assert_eq!(reason, None);
+    }
+
+    #[test]
     fn selling_price_update_preserves_purchase_cost_and_records_price_history() {
         let conn = open_in_memory().unwrap();
         let business = create_business(&conn, "Hardware shop", None).unwrap();
@@ -2914,6 +3015,8 @@ mod tests {
             &[SaleItemInput {
                 product_id: product.id.clone(),
                 quantity: 1_000,
+                selling_price: None,
+                price_change_reason: None,
             }],
             "cash",
         )
@@ -2960,6 +3063,62 @@ mod tests {
     }
 
     #[test]
+    fn checkout_sale_records_overridden_price_and_reason_without_changing_product_price() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "POS-SALE-PRICE-01");
+        set_opening_stock(&conn, &business.id, &product.id, 2_000, None).unwrap();
+        let listed_price = 15_000;
+        update_base_selling_price(&conn, &business.id, &product.id, listed_price).unwrap();
+        let override_price = 13_500;
+
+        let receipt = checkout_sale(
+            &conn,
+            &business.id,
+            &[SaleItemInput {
+                product_id: product.id.clone(),
+                quantity: 1_000,
+                selling_price: Some(override_price),
+                price_change_reason: Some("  Customer negotiated  ".to_string()),
+            }],
+            "cash",
+        )
+        .unwrap();
+        let saved_prices: (i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT listed_unit_price, unit_price, price_change_reason
+                 FROM sale_items WHERE sale_id = ?1",
+                params![receipt.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let current_product_price: i64 = conn
+            .query_row(
+                "SELECT selling_price FROM products WHERE id = ?1",
+                params![product.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(receipt.total, override_price);
+        assert_eq!(receipt.items[0].listed_unit_price, listed_price);
+        assert_eq!(receipt.items[0].unit_price, override_price);
+        assert_eq!(
+            receipt.items[0].price_change_reason.as_deref(),
+            Some("Customer negotiated")
+        );
+        assert_eq!(
+            saved_prices,
+            (
+                listed_price,
+                override_price,
+                Some("Customer negotiated".to_string())
+            )
+        );
+        assert_eq!(current_product_price, listed_price);
+    }
+
+    #[test]
     fn checkout_sale_rejects_insufficient_stock_and_invalid_payment_without_writes() {
         let conn = open_in_memory().unwrap();
         let business = create_business(&conn, "Hardware shop", None).unwrap();
@@ -2968,6 +3127,8 @@ mod tests {
         let item = SaleItemInput {
             product_id: product.id.clone(),
             quantity: 2_000,
+            selling_price: None,
+            price_change_reason: None,
         };
 
         assert!(matches!(
@@ -2981,6 +3142,36 @@ mod tests {
                 &[SaleItemInput {
                     product_id: product.id.clone(),
                     quantity: 1_000,
+                    selling_price: Some(10_000),
+                    price_change_reason: None,
+                }],
+                "cash"
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            checkout_sale(
+                &conn,
+                &business.id,
+                &[SaleItemInput {
+                    product_id: product.id.clone(),
+                    quantity: 1_000,
+                    selling_price: Some(10_000),
+                    price_change_reason: Some("x".repeat(501)),
+                }],
+                "cash"
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            checkout_sale(
+                &conn,
+                &business.id,
+                &[SaleItemInput {
+                    product_id: product.id.clone(),
+                    quantity: 1_000,
+                    selling_price: None,
+                    price_change_reason: None,
                 }],
                 "credit"
             ),
