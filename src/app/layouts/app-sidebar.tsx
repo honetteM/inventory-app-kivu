@@ -45,7 +45,7 @@ export function AppSidebar() {
                       asChild
                       isActive={pathname === item.url || (item.url !== "/" && pathname.startsWith(`${item.url}/`))}
                       tooltip={item.title}
-                      className="relative h-10 rounded-lg px-3 text-[13px] text-sidebar-foreground/80 data-[active=true]:bg-sidebar-accent data-[active=true]:font-semibold data-[active=true]:text-sidebar-accent-foreground before:absolute before:left-0 before:top-1/2 before:h-5 before:w-0.5 before:-translate-y-1/2 before:rounded-full before:bg-sidebar-primary before:opacity-0 data-[active=true]:before:opacity-100"
+                      className="relative h-10 rounded-lg px-3 text-[13px] text-sidebar-foreground/80 hover:bg-sidebar-foreground/5 hover:text-sidebar-foreground data-[active=true]:bg-sidebar-accent data-[active=true]:font-semibold data-[active=true]:text-sidebar-accent-foreground before:absolute before:left-0 before:top-1/2 before:h-5 before:w-0.5 before:-translate-y-1/2 before:rounded-full before:bg-sidebar-primary before:opacity-0 data-[active=true]:before:opacity-100"
                     >
                       <Link to={item.url}>
                         <item.icon />
