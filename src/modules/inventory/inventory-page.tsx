@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PageHeader } from "@/components/shared/page-header";
+import { SelectField } from "@/components/shared/select-field";
 import {
   Table,
   TableBody,
@@ -507,18 +509,14 @@ export function InventoryPage() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-        <div>
-          <p className="text-sm font-medium text-muted-foreground">Stock control</p>
-          <h1 className="text-3xl font-semibold tracking-tight">Inventory</h1>
-          <p className="mt-2 text-muted-foreground">
-            Record opening quantities, receive deliveries, correct counted stock, and review stock value.
-          </p>
-        </div>
-        {businesses.length > 0 ? (
-          <div className="w-full space-y-2 md:max-w-xs">
+      <PageHeader
+        eyebrow="Stock control"
+        title="Inventory"
+        description="Record opening quantities, receive deliveries, correct counted stock, and review stock value."
+        actions={businesses.length > 0 ? (
+          <div className="w-full space-y-1.5 sm:w-56">
             <Label htmlFor="inventory-business">Business</Label>
-            <select
+            <SelectField
               id="inventory-business"
               value={businessId}
               onChange={(event) => {
@@ -529,15 +527,14 @@ export function InventoryPage() {
                 setTotalCount(0);
                 setInventorySummary({ total_stock_value: 0, low_stock_count: 0, out_of_stock_count: 0 });
               }}
-              className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
             >
               {businesses.map((business) => (
                 <option key={business.id} value={business.id}>{business.name}</option>
               ))}
-            </select>
+            </SelectField>
           </div>
-        ) : null}
-      </header>
+        ) : undefined}
+      />
 
       {error ? (
         <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
@@ -560,7 +557,7 @@ export function InventoryPage() {
         </Card>
       ) : (
         <>
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 xl:grid-cols-3">
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">Inventory value</CardTitle>
@@ -666,7 +663,12 @@ export function InventoryPage() {
                           </TableCell>
                           <TableCell className="text-right">{formatQuantity(item.min_stock_quantity)}</TableCell>
                           <TableCell>
-                            <Badge variant={isLowStock ? "destructive" : "secondary"}>
+                            <Badge
+                              variant={item.quantity_on_hand === 0 ? "destructive" : isLowStock ? "outline" : "secondary"}
+                              className={isLowStock && item.quantity_on_hand > 0
+                                ? "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300"
+                                : undefined}
+                            >
                               {item.quantity_on_hand === 0 ? "Out of stock" : isLowStock ? "Low stock" : "In stock"}
                             </Badge>
                           </TableCell>

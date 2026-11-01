@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PageHeader } from "@/components/shared/page-header";
+import { SelectField } from "@/components/shared/select-field";
 
 interface Business {
   id: string;
@@ -186,26 +188,48 @@ export function SuppliersPage() {
     setError(null);
   }
 
+  const pageHeader = (
+    <PageHeader
+      eyebrow="Purchasing"
+      title="Suppliers"
+      description="Keep supplier contact and tax details ready for purchase invoices."
+      actions={businesses.length > 0 ? (
+        <div className="w-full space-y-1.5 sm:w-56">
+          <Label htmlFor="supplier-business">Business</Label>
+          <SelectField
+            id="supplier-business"
+            value={businessId}
+            onChange={(event) => {
+              setBusinessId(event.target.value);
+              resetForm();
+            }}
+          >
+            {businesses.map((business) => (
+              <option key={business.id} value={business.id}>{business.name}</option>
+            ))}
+          </SelectField>
+        </div>
+      ) : undefined}
+    />
+  );
+
   if (isLoadingBusinesses) {
     return (
-      <Card>
-        <CardContent className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-          <LoaderCircle className="size-4 animate-spin" />
-          Loading businesses...
-        </CardContent>
-      </Card>
+      <div className="mx-auto max-w-7xl space-y-6">
+        {pageHeader}
+        <Card>
+          <CardContent className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+            <LoaderCircle className="size-4 animate-spin" />
+            Loading businesses...
+          </CardContent>
+        </Card>
+      </div>
     );
   }
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <header className="space-y-2">
-        <p className="text-sm font-medium text-muted-foreground">Purchasing</p>
-        <h1 className="text-3xl font-semibold tracking-tight">Suppliers</h1>
-        <p className="text-muted-foreground">
-          Keep supplier contact and tax details ready for purchase invoices.
-        </p>
-      </header>
+      {pageHeader}
 
       {error ? (
         <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
@@ -221,23 +245,6 @@ export function SuppliersPage() {
         </Card>
       ) : (
         <>
-          <div className="max-w-sm space-y-2">
-            <Label htmlFor="supplier-business">Business</Label>
-            <select
-              id="supplier-business"
-              value={businessId}
-              onChange={(event) => {
-                setBusinessId(event.target.value);
-                resetForm();
-              }}
-              className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-            >
-              {businesses.map((business) => (
-                <option key={business.id} value={business.id}>{business.name}</option>
-              ))}
-            </select>
-          </div>
-
           <div className="grid gap-6 xl:grid-cols-[minmax(20rem,0.8fr)_minmax(0,1.2fr)]">
             <Card>
               <CardHeader>

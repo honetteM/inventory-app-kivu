@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PageHeader } from "@/components/shared/page-header";
 import { BrandManagementSection } from "./brand-management-section";
 import { CategoryManagementSection } from "./category-management-section";
 import { UnitManagementSection } from "./unit-management-section";
@@ -80,13 +81,11 @@ export function BusinessSetupPage() {
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
-      <header>
-        <p className="text-sm font-medium text-muted-foreground">Settings</p>
-        <h1 className="text-3xl font-semibold tracking-tight">Business configuration</h1>
-        <p className="mt-2 text-muted-foreground">
-          Register your business details. Currency and regional defaults are configured for Rwanda.
-        </p>
-      </header>
+      <PageHeader
+        eyebrow="Workspace settings"
+        title="Business configuration"
+        description="Register your business details. Currency and regional defaults are configured for Rwanda."
+      />
 
       {error ? (
         <div

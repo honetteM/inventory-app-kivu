@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PageHeader } from "@/components/shared/page-header";
+import { SelectField } from "@/components/shared/select-field";
 
 const QUANTITY_SCALE = 1000n;
 const MONEY_SCALE = 100n;
@@ -489,26 +491,48 @@ export function PurchasesPage() {
     }
   }
 
+  const pageHeader = (
+    <PageHeader
+      eyebrow="Purchasing"
+      title="Purchase invoices"
+      description="Record supplier invoices, then receive stock as each delivery arrives."
+      actions={businesses.length > 0 ? (
+        <div className="w-full space-y-1.5 sm:w-56">
+          <Label htmlFor="purchase-business">Business</Label>
+          <SelectField
+            id="purchase-business"
+            value={businessId}
+            onChange={(event) => {
+              setBusinessId(event.target.value);
+              resetDraft();
+            }}
+          >
+            {businesses.map((business) => (
+              <option key={business.id} value={business.id}>{business.name}</option>
+            ))}
+          </SelectField>
+        </div>
+      ) : undefined}
+    />
+  );
+
   if (isLoadingBusinesses) {
     return (
-      <Card>
-        <CardContent className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-          <LoaderCircle className="size-4 animate-spin" />
-          Loading businesses...
-        </CardContent>
-      </Card>
+      <div className="mx-auto max-w-7xl space-y-6">
+        {pageHeader}
+        <Card>
+          <CardContent className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+            <LoaderCircle className="size-4 animate-spin" />
+            Loading businesses...
+          </CardContent>
+        </Card>
+      </div>
     );
   }
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <header className="space-y-2">
-        <p className="text-sm font-medium text-muted-foreground">Purchasing</p>
-        <h1 className="text-3xl font-semibold tracking-tight">Purchase invoices</h1>
-        <p className="text-muted-foreground">
-          Record supplier invoices, then receive stock as each delivery arrives.
-        </p>
-      </header>
+      {pageHeader}
 
       {error ? (
         <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
@@ -524,23 +548,6 @@ export function PurchasesPage() {
         </Card>
       ) : (
         <>
-          <div className="max-w-sm space-y-2">
-            <Label htmlFor="purchase-business">Business</Label>
-            <select
-              id="purchase-business"
-              value={businessId}
-              onChange={(event) => {
-                setBusinessId(event.target.value);
-                resetDraft();
-              }}
-              className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-            >
-              {businesses.map((business) => (
-                <option key={business.id} value={business.id}>{business.name}</option>
-              ))}
-            </select>
-          </div>
-
           <Card>
             <CardHeader>
               <CardTitle>Record purchase invoice</CardTitle>
@@ -562,7 +569,7 @@ export function PurchasesPage() {
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="purchase-supplier">Supplier</Label>
-                      <select
+                      <SelectField
                         id="purchase-supplier"
                         required
                         value={supplierId}
@@ -571,12 +578,11 @@ export function PurchasesPage() {
                           setDuplicateWarning(null);
                           setDuplicateAuthorizationRequested(false);
                         }}
-                        className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                       >
                         {suppliers.map((supplier) => (
                           <option key={supplier.id} value={supplier.id}>{supplier.name}</option>
                         ))}
-                      </select>
+                      </SelectField>
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="purchase-invoice-number">Supplier invoice number</Label>
@@ -597,7 +603,7 @@ export function PurchasesPage() {
                   <div className="grid items-end gap-3 rounded-lg border p-4 md:grid-cols-2 xl:grid-cols-[minmax(12rem,1.5fr)_1fr_1fr_auto]">
                     <div className="space-y-2">
                       <Label htmlFor="purchase-product">Product</Label>
-                      <select
+                      <SelectField
                         id="purchase-product"
                         value={draftProductId}
                         onChange={(event) => {
@@ -605,7 +611,6 @@ export function PurchasesPage() {
                           setDraftProductId(event.target.value);
                           setDraftUnitCost(product ? String(Math.floor(product.purchase_price / 100)) : "");
                         }}
-                        className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                       >
                         <option value="">Select product</option>
                         {products.map((product) => (
@@ -613,7 +618,7 @@ export function PurchasesPage() {
                             {product.name} ({product.sku})
                           </option>
                         ))}
-                      </select>
+                      </SelectField>
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="purchase-quantity">
@@ -799,19 +804,18 @@ export function PurchasesPage() {
                           </div>
                           <div className="space-y-2">
                             <Label htmlFor={`payment-method-${purchase.id}`}>Payment method</Label>
-                            <select
+                            <SelectField
                               id={`payment-method-${purchase.id}`}
                               value={paymentMethods[purchase.id] ?? "cash"}
                               onChange={(event) => setPaymentMethods((current) => ({
                                 ...current,
                                 [purchase.id]: event.target.value as PaymentMethod,
                               }))}
-                              className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                             >
                               {PAYMENT_METHODS.map((method) => (
                                 <option key={method.value} value={method.value}>{method.label}</option>
                               ))}
-                            </select>
+                            </SelectField>
                           </div>
                           <Button type="submit" className="self-end" disabled={payingPurchaseId !== null}>
                             {payingPurchaseId === purchase.id

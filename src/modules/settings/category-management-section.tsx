@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SelectField } from "@/components/shared/select-field";
 
 interface BusinessOption {
   id: string;
@@ -158,21 +159,20 @@ export function CategoryManagementSection({ businesses }: { businesses: Business
           <>
             <div className="max-w-sm space-y-2">
               <Label htmlFor="category-business">Business</Label>
-              <select
+              <SelectField
                 id="category-business"
                 value={businessId}
                 onChange={(event) => {
                   setBusinessId(event.target.value);
                   setParentId("");
                 }}
-                className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
               >
                 {businesses.map((business) => (
                   <option key={business.id} value={business.id}>
                     {business.name}
                   </option>
                 ))}
-              </select>
+              </SelectField>
             </div>
 
             <form className="grid gap-4 rounded-lg border p-4 md:grid-cols-2" onSubmit={handleSubmit}>
@@ -189,11 +189,10 @@ export function CategoryManagementSection({ businesses }: { businesses: Business
               </div>
               <div className="space-y-2">
                 <Label htmlFor="category-parent">Parent category (optional)</Label>
-                <select
+                <SelectField
                   id="category-parent"
                   value={parentId}
                   onChange={(event) => setParentId(event.target.value)}
-                  className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                 >
                   <option value="">No parent (top-level)</option>
                   {categories.map((category) => (
@@ -201,7 +200,7 @@ export function CategoryManagementSection({ businesses }: { businesses: Business
                       {category.name}
                     </option>
                   ))}
-                </select>
+                </SelectField>
               </div>
               <div className="space-y-2 md:col-span-2">
                 <Label htmlFor="category-description">Description (optional)</Label>

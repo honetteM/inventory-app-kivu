@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PageHeader } from "@/components/shared/page-header";
+import { SelectField } from "@/components/shared/select-field";
 
 const PAGE_SIZE = 30;
 const QUANTITY_SCALE = 1000n;
@@ -370,40 +372,15 @@ export function PosPage() {
     }
   }
 
-  if (isLoadingBusinesses) {
-    return (
-      <Card>
-        <CardContent className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-          <LoaderCircle className="size-4 animate-spin" />
-          Loading businesses...
-        </CardContent>
-      </Card>
-    );
-  }
-
-  if (businesses.length === 0) {
-    return (
-      <Card>
-        <CardContent className="py-6 text-sm text-muted-foreground">
-          Register a business and add products before using the point of sale.
-        </CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <div className="mx-auto max-w-7xl space-y-6">
-      <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-        <div>
-          <p className="text-sm font-medium text-muted-foreground">Sales</p>
-          <h1 className="text-3xl font-semibold tracking-tight">Point of Sale</h1>
-          <p className="mt-2 text-muted-foreground">
-            Find products, take payment, and save sales with their stock movements.
-          </p>
-        </div>
-        <div className="w-full space-y-2 md:max-w-xs">
+  const pageHeader = (
+    <PageHeader
+      eyebrow="Sales"
+      title="Point of Sale"
+      description="Find products, take payment, and save sales with their stock movements."
+      actions={businesses.length > 0 ? (
+        <div className="w-full space-y-1.5 sm:w-56">
           <Label htmlFor="pos-business">Business</Label>
-          <select
+          <SelectField
             id="pos-business"
             value={businessId}
             onChange={(event) => {
@@ -412,14 +389,46 @@ export function PosPage() {
               setCart([]);
               setCompletedSale(null);
             }}
-            className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
           >
             {businesses.map((business) => (
               <option key={business.id} value={business.id}>{business.name}</option>
             ))}
-          </select>
+          </SelectField>
         </div>
-      </header>
+      ) : undefined}
+    />
+  );
+
+  if (isLoadingBusinesses) {
+    return (
+      <div className="mx-auto max-w-7xl space-y-6">
+        {pageHeader}
+        <Card>
+          <CardContent className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+            <LoaderCircle className="size-4 animate-spin" />
+            Loading businesses...
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (businesses.length === 0) {
+    return (
+      <div className="mx-auto max-w-7xl space-y-6">
+        {pageHeader}
+        <Card>
+          <CardContent className="py-6 text-sm text-muted-foreground">
+            Register a business and add products before using the point of sale.
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto max-w-7xl space-y-6">
+      {pageHeader}
 
       {error ? (
         <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
@@ -470,7 +479,7 @@ export function PosPage() {
         </Card>
       ) : null}
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.5fr)_minmax(22rem,1fr)]">
+      <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(18rem,0.9fr)]">
         <Card>
           <CardHeader>
             <CardTitle>Find products</CardTitle>
@@ -545,7 +554,7 @@ export function PosPage() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="lg:sticky lg:top-4 lg:max-h-[calc(100svh-6rem)] lg:overflow-y-auto">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <ShoppingCart className="size-5" />
@@ -592,7 +601,7 @@ export function PosPage() {
                         </Button>
                       </div>
                       <div className="flex items-end justify-between gap-3">
-                        <div className="grid flex-1 gap-3 sm:grid-cols-2">
+                        <div className="grid flex-1 gap-3">
                           <div className="space-y-1">
                             <Label htmlFor={`pos-quantity-${item.product.id}`} className="text-xs">
                               Quantity ({item.product.base_unit_name})
@@ -652,7 +661,7 @@ export function PosPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="pos-payment-method">Payment method</Label>
-                <select
+                <SelectField
                   id="pos-payment-method"
                   value={paymentMethod}
                   onChange={(event) => {
@@ -661,12 +670,11 @@ export function PosPage() {
                       setPaymentMethod(selected.value);
                     }
                   }}
-                  className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                 >
                   {PAYMENT_METHODS.map((method) => (
                     <option key={method.value} value={method.value}>{method.label}</option>
                   ))}
-                </select>
+                </SelectField>
               </div>
               <Button
                 className="w-full"

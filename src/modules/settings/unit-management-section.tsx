@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SelectField } from "@/components/shared/select-field";
 
 interface BusinessOption {
   id: string;
@@ -120,18 +121,17 @@ export function UnitManagementSection({ businesses }: { businesses: BusinessOpti
           <>
             <div className="max-w-sm space-y-2">
               <Label htmlFor="unit-business">Business</Label>
-              <select
+              <SelectField
                 id="unit-business"
                 value={businessId}
                 onChange={(event) => setBusinessId(event.target.value)}
-                className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
               >
                 {businesses.map((business) => (
                   <option key={business.id} value={business.id}>
                     {business.name}
                   </option>
                 ))}
-              </select>
+              </SelectField>
             </div>
 
             <form className="grid gap-4 rounded-lg border p-4 md:grid-cols-[1fr_1fr_auto_auto]" onSubmit={handleSubmit}>

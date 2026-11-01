@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PageHeader } from "@/components/shared/page-header";
+import { SelectField } from "@/components/shared/select-field";
 import {
   Table,
   TableBody,
@@ -488,33 +490,28 @@ export function ProductsPage() {
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
-      <header className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-        <div>
-          <p className="text-sm font-medium text-muted-foreground">Catalogue</p>
-          <h1 className="text-3xl font-semibold tracking-tight">Products</h1>
-          <p className="mt-2 text-muted-foreground">
-            Manage product details, pricing, categories, and base units.
-          </p>
-        </div>
-        {businesses.length > 0 ? (
-          <div className="w-full space-y-2 md:max-w-xs">
+      <PageHeader
+        eyebrow="Catalogue"
+        title="Products"
+        description="Manage product details, pricing, categories, and base units."
+        actions={businesses.length > 0 ? (
+          <div className="w-full space-y-1.5 sm:w-56">
             <Label htmlFor="products-business">Business</Label>
-            <select
+            <SelectField
               id="products-business"
               value={businessId}
               onChange={(event) => {
                 setBusinessId(event.target.value);
                 setPage(0);
               }}
-              className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
             >
               {businesses.map((business) => (
                 <option key={business.id} value={business.id}>{business.name}</option>
               ))}
-            </select>
+            </SelectField>
           </div>
-        ) : null}
-      </header>
+        ) : undefined}
+      />
 
       {error ? (
         <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
@@ -555,7 +552,7 @@ export function ProductsPage() {
                   No active units are available. Configure units in Settings before adding products.
                 </p>
               ) : (
-                <form className="grid gap-4 md:grid-cols-2 xl:grid-cols-3" onSubmit={handleSubmit}>
+                <form className="grid min-w-0 gap-4 xl:grid-cols-2" onSubmit={handleSubmit}>
                   <div className="space-y-2">
                     <Label htmlFor="product-name">Product name</Label>
                     <Input id="product-name" required maxLength={160} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Cement 50kg" />
@@ -570,31 +567,31 @@ export function ProductsPage() {
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="product-category">Category (optional)</Label>
-                    <select id="product-category" value={categoryId} onChange={(event) => setCategoryId(event.target.value)} className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+                    <SelectField id="product-category" value={categoryId} onChange={(event) => setCategoryId(event.target.value)}>
                       <option value="">No category</option>
                       {categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-                    </select>
+                    </SelectField>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="product-brand">Brand (optional)</Label>
-                    <select id="product-brand" value={brandId} onChange={(event) => setBrandId(event.target.value)} className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+                    <SelectField id="product-brand" value={brandId} onChange={(event) => setBrandId(event.target.value)}>
                       <option value="">No brand</option>
                       {brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
-                    </select>
+                    </SelectField>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="product-unit">Base unit</Label>
-                    <select id="product-unit" required value={baseUnitId} onChange={(event) => setBaseUnitId(event.target.value)} className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+                    <SelectField id="product-unit" required value={baseUnitId} onChange={(event) => setBaseUnitId(event.target.value)}>
                       {availableUnits.map((unit) => <option key={unit.id} value={unit.id}>{unit.name} ({unit.code})</option>)}
-                    </select>
+                    </SelectField>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="product-vat">VAT classification</Label>
-                    <select id="product-vat" value={vatClass} onChange={(event) => setVatClass(event.target.value)} className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+                    <SelectField id="product-vat" value={vatClass} onChange={(event) => setVatClass(event.target.value)}>
                       <option value="standard">Standard</option>
                       <option value="zero">Zero-rated</option>
                       <option value="exempt">Exempt</option>
-                    </select>
+                    </SelectField>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="product-purchase-price">Purchase price per base unit (RWF)</Label>
@@ -620,7 +617,7 @@ export function ProductsPage() {
                     <Label htmlFor="product-description">Description (optional)</Label>
                     <Input id="product-description" maxLength={500} value={description} onChange={(event) => setDescription(event.target.value)} />
                   </div>
-                  <div className="flex justify-end md:col-span-2 xl:col-span-3">
+                  <div className="flex justify-end xl:col-span-2">
                     <Button type="submit" disabled={isSaving || isLoadingOptions || !baseUnitId}>
                       {isSaving ? <LoaderCircle className="animate-spin" /> : <PackagePlus />}
                       {isSaving ? "Saving..." : "Add product"}
@@ -777,18 +774,17 @@ export function ProductsPage() {
                                     <form className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_auto]" onSubmit={handleProductUnitSubmit}>
                                       <div className="space-y-2">
                                         <Label htmlFor={`selling-unit-${product.id}`}>Selling unit</Label>
-                                        <select
+                                        <SelectField
                                           id={`selling-unit-${product.id}`}
                                           required
                                           value={sellingUnitId}
                                           onChange={(event) => setSellingUnitId(event.target.value)}
-                                          className="h-9 w-full rounded-lg border border-input bg-background px-3 text-sm focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
                                         >
                                           <option value="">Select unit</option>
                                           {availableSellingUnits.map((unit) => (
                                             <option key={unit.id} value={unit.id}>{unit.name} ({unit.code})</option>
                                           ))}
-                                        </select>
+                                        </SelectField>
                                       </div>
                                       <div className="space-y-2">
                                         <Label htmlFor={`conversion-${product.id}`}>Base units per selling unit</Label>
