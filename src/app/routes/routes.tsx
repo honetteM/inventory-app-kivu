@@ -4,6 +4,7 @@ import { PagePlaceholder } from "@/components/shared/page-placeholder";
 import { DashboardPage } from "@/modules/dashboard/dashboard-page";
 import { InventoryPage } from "@/modules/inventory/inventory-page";
 import { PosPage } from "@/modules/pos/pos-page";
+import { PurchasesPage } from "@/modules/purchases/purchases-page";
 import { ProductsPage } from "@/modules/products/products-page";
 import { BusinessSetupPage } from "@/modules/settings/business-setup-page";
 import { SuppliersPage } from "@/modules/suppliers/suppliers-page";
@@ -21,7 +22,7 @@ export const router = createBrowserRouter([
       { path: "pos", element: <PosPage /> },
       { path: "products", element: <ProductsPage /> },
       { path: "inventory", element: <InventoryPage /> },
-      { path: "purchases", element: placeholder("Purchases", "Supplier invoices and stock receiving.") },
+      { path: "purchases", element: <PurchasesPage /> },
       { path: "sales", element: placeholder("Sales History", "Completed transactions and returns.") },
       { path: "customers", element: placeholder("Customers", "Customer accounts, credit limits and debts.") },
       { path: "suppliers", element: <SuppliersPage /> },

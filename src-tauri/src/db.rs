@@ -36,6 +36,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "008_sale_price_overrides",
         include_str!("../migrations/008_sale_price_overrides.sql"),
     ),
+    (
+        9,
+        "009_purchases",
+        include_str!("../migrations/009_purchases.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -1050,6 +1055,675 @@ pub fn checkout_sale(
         total,
         created_at: timestamp,
         items: receipt_items,
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PurchaseProduct {
+    pub id: String,
+    pub name: String,
+    pub sku: String,
+    pub base_unit_name: String,
+    pub purchase_price: i64,
+    pub base_unit_allows_decimals: bool,
+}
+
+pub fn list_purchase_products(
+    conn: &Connection,
+    business_id: &str,
+) -> Result<Vec<PurchaseProduct>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.name, p.sku, u.name, p.purchase_price, u.decimals_ok
+         FROM products p
+         JOIN units u ON u.id = p.base_unit_id
+         WHERE p.business_id = ?1 AND p.is_active = 1
+         ORDER BY p.name COLLATE NOCASE, p.id
+         LIMIT 500",
+    )?;
+    let products = stmt
+        .query_map(params![business_id], |row| {
+            Ok(PurchaseProduct {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                sku: row.get(2)?,
+                base_unit_name: row.get(3)?,
+                purchase_price: row.get(4)?,
+                base_unit_allows_decimals: row.get::<_, i64>(5)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(products)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PurchaseItemInput {
+    pub product_id: String,
+    pub ordered_quantity: i64,
+    pub unit_cost: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PurchaseItem {
+    pub id: String,
+    pub product_id: String,
+    pub product_name: String,
+    pub sku: String,
+    pub unit_name: String,
+    pub ordered_quantity: i64,
+    pub received_quantity: i64,
+    pub unit_cost: i64,
+    pub line_total: i64,
+    pub base_unit_allows_decimals: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PurchaseDeliveryItem {
+    pub product_name: String,
+    pub quantity: i64,
+    pub unit_name: String,
+    pub total_cost: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PurchaseDelivery {
+    pub id: String,
+    pub delivery_reference: Option<String>,
+    pub notes: Option<String>,
+    pub total_cost: i64,
+    pub created_at: String,
+    pub items: Vec<PurchaseDeliveryItem>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct Purchase {
+    pub id: String,
+    pub supplier_id: String,
+    pub supplier_name: String,
+    pub supplier_invoice_number: String,
+    pub status: String,
+    pub subtotal: i64,
+    pub duplicate_authorized: bool,
+    pub duplicate_of_purchase_id: Option<String>,
+    pub created_at: String,
+    pub items: Vec<PurchaseItem>,
+    pub deliveries: Vec<PurchaseDelivery>,
+}
+
+fn load_purchase(
+    conn: &Connection,
+    business_id: &str,
+    purchase_id: &str,
+) -> Result<Purchase, DbError> {
+    let mut purchase = conn.query_row(
+        "SELECT p.id, p.supplier_id, s.name, p.supplier_invoice_number, p.status,
+                p.subtotal, p.duplicate_authorized, p.duplicate_of_purchase_id, p.created_at
+         FROM purchases p
+         JOIN suppliers s ON s.id = p.supplier_id AND s.business_id = p.business_id
+         WHERE p.id = ?1 AND p.business_id = ?2",
+        params![purchase_id, business_id],
+        |row| {
+            Ok(Purchase {
+                id: row.get(0)?,
+                supplier_id: row.get(1)?,
+                supplier_name: row.get(2)?,
+                supplier_invoice_number: row.get(3)?,
+                status: row.get(4)?,
+                subtotal: row.get(5)?,
+                duplicate_authorized: row.get::<_, i64>(6)? != 0,
+                duplicate_of_purchase_id: row.get(7)?,
+                created_at: row.get(8)?,
+                items: Vec::new(),
+                deliveries: Vec::new(),
+            })
+        },
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT pi.id, pi.product_id, pi.product_name, pi.sku, pi.unit_name,
+                pi.ordered_quantity, pi.received_quantity, pi.unit_cost, pi.line_total,
+                u.decimals_ok
+         FROM purchase_items pi
+         JOIN products p ON p.id = pi.product_id AND p.business_id = pi.business_id
+         JOIN units u ON u.id = p.base_unit_id
+         WHERE pi.business_id = ?1 AND pi.purchase_id = ?2
+         ORDER BY pi.product_name COLLATE NOCASE, pi.id",
+    )?;
+    purchase.items = stmt
+        .query_map(params![business_id, purchase_id], |row| {
+            Ok(PurchaseItem {
+                id: row.get(0)?,
+                product_id: row.get(1)?,
+                product_name: row.get(2)?,
+                sku: row.get(3)?,
+                unit_name: row.get(4)?,
+                ordered_quantity: row.get(5)?,
+                received_quantity: row.get(6)?,
+                unit_cost: row.get(7)?,
+                line_total: row.get(8)?,
+                base_unit_allows_decimals: row.get::<_, i64>(9)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut receipt_stmt = conn.prepare(
+        "SELECT id, delivery_reference, notes, created_at
+         FROM purchase_receipts
+         WHERE business_id = ?1 AND purchase_id = ?2
+         ORDER BY created_at DESC, id",
+    )?;
+    let receipts = receipt_stmt
+        .query_map(params![business_id, purchase_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (receipt_id, delivery_reference, notes, created_at) in receipts {
+        let mut item_stmt = conn.prepare(
+            "SELECT pi.product_name, pri.quantity, pi.unit_name, pri.total_cost
+             FROM purchase_receipt_items pri
+             JOIN purchase_items pi
+               ON pi.id = pri.purchase_item_id AND pi.business_id = pri.business_id
+             WHERE pri.business_id = ?1 AND pri.receipt_id = ?2
+             ORDER BY pi.product_name COLLATE NOCASE",
+        )?;
+        let items = item_stmt
+            .query_map(params![business_id, receipt_id], |row| {
+                Ok(PurchaseDeliveryItem {
+                    product_name: row.get(0)?,
+                    quantity: row.get(1)?,
+                    unit_name: row.get(2)?,
+                    total_cost: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let total_cost = items.iter().try_fold(0_i64, |total, item| {
+            total.checked_add(item.total_cost).ok_or_else(|| {
+                DbError::InvalidInput("delivery total exceeds the supported limit".into())
+            })
+        })?;
+        purchase.deliveries.push(PurchaseDelivery {
+            id: receipt_id,
+            delivery_reference,
+            notes,
+            total_cost,
+            created_at,
+            items,
+        });
+    }
+    Ok(purchase)
+}
+
+pub fn list_purchases(conn: &Connection, business_id: &str) -> Result<Vec<Purchase>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM purchases WHERE business_id = ?1 ORDER BY created_at DESC, id LIMIT 200",
+    )?;
+    let purchase_ids = stmt
+        .query_map(params![business_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    purchase_ids
+        .iter()
+        .map(|purchase_id| load_purchase(conn, business_id, purchase_id))
+        .collect()
+}
+
+pub fn create_purchase(
+    conn: &Connection,
+    business_id: &str,
+    supplier_id: &str,
+    supplier_invoice_number: &str,
+    items: &[PurchaseItemInput],
+    authorize_duplicate: bool,
+) -> Result<Purchase, DbError> {
+    let invoice_number = supplier_invoice_number.trim();
+    if invoice_number.is_empty() || invoice_number.chars().count() > 200 {
+        return Err(DbError::InvalidInput(
+            "supplier invoice number is required and must be 200 characters or fewer".to_string(),
+        ));
+    }
+    if items.is_empty() || items.len() > 100 {
+        return Err(DbError::InvalidInput(
+            "a purchase must contain between 1 and 100 products".to_string(),
+        ));
+    }
+    let mut seen_products = HashSet::with_capacity(items.len());
+    for item in items {
+        if item.ordered_quantity <= 0 {
+            return Err(DbError::InvalidInput(
+                "ordered quantity must be greater than zero".to_string(),
+            ));
+        }
+        if item.unit_cost < 0 {
+            return Err(DbError::InvalidInput(
+                "unit cost must not be negative".to_string(),
+            ));
+        }
+        if !seen_products.insert(item.product_id.as_str()) {
+            return Err(DbError::InvalidInput(
+                "a product can only appear once on a purchase invoice".to_string(),
+            ));
+        }
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let supplier: Option<i64> = tx
+        .query_row(
+            "SELECT is_active FROM suppliers WHERE id = ?1 AND business_id = ?2",
+            params![supplier_id, business_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match supplier {
+        Some(1) => {}
+        Some(_) => {
+            return Err(DbError::InvalidInput(
+                "the selected supplier is inactive".to_string(),
+            ));
+        }
+        None => {
+            return Err(DbError::InvalidInput(
+                "supplier does not belong to this business".to_string(),
+            ));
+        }
+    }
+
+    let duplicate_of: Option<String> = tx
+        .query_row(
+            "SELECT id FROM purchases
+             WHERE business_id = ?1 AND supplier_id = ?2
+               AND supplier_invoice_number = ?3 COLLATE NOCASE
+             ORDER BY created_at, id LIMIT 1",
+            params![business_id, supplier_id, invoice_number],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if duplicate_of.is_some() && !authorize_duplicate {
+        return Err(DbError::InvalidInput(format!(
+            "DUPLICATE_PURCHASE_INVOICE: invoice {invoice_number} already exists for this supplier; confirm authorization to record it again"
+        )));
+    }
+
+    let mut lines = Vec::with_capacity(items.len());
+    let mut subtotal = 0_i64;
+    for item in items {
+        let product: Option<(String, String, String, i64, i64)> = tx
+            .query_row(
+                "SELECT p.name, p.sku, u.name, u.decimals_ok, p.is_active
+                 FROM products p JOIN units u ON u.id = p.base_unit_id
+                 WHERE p.id = ?1 AND p.business_id = ?2",
+                params![item.product_id, business_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (product_name, sku, unit_name, allows_decimals, is_active) =
+            product.ok_or_else(|| {
+                DbError::InvalidInput("a selected product does not belong to this business".into())
+            })?;
+        if is_active == 0 {
+            return Err(DbError::InvalidInput(
+                "a selected product is no longer active".to_string(),
+            ));
+        }
+        if allows_decimals == 0 && item.ordered_quantity % 1000 != 0 {
+            return Err(DbError::InvalidInput(format!(
+                "{product_name} only allows whole base units"
+            )));
+        }
+        let line_total = stock_value(item.ordered_quantity, item.unit_cost)?;
+        subtotal = subtotal.checked_add(line_total).ok_or_else(|| {
+            DbError::InvalidInput("purchase total exceeds the supported limit".into())
+        })?;
+        lines.push((item, product_name, sku, unit_name, line_total));
+    }
+
+    let purchase_id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    let duplicate_authorized = duplicate_of.is_some();
+    tx.execute(
+        "INSERT INTO purchases
+            (id, business_id, supplier_id, supplier_invoice_number, status, subtotal,
+             duplicate_authorized, duplicate_of_purchase_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, ?7, ?8, ?8)",
+        params![
+            purchase_id,
+            business_id,
+            supplier_id,
+            invoice_number,
+            subtotal,
+            i64::from(duplicate_authorized),
+            duplicate_of,
+            timestamp
+        ],
+    )?;
+    for (item, product_name, sku, unit_name, line_total) in lines {
+        tx.execute(
+            "INSERT INTO purchase_items
+                (id, business_id, purchase_id, product_id, product_name, sku, unit_name,
+                 ordered_quantity, unit_cost, line_total)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                business_id,
+                purchase_id,
+                item.product_id,
+                product_name,
+                sku,
+                unit_name,
+                item.ordered_quantity,
+                item.unit_cost,
+                line_total
+            ],
+        )?;
+    }
+    tx.commit()?;
+    load_purchase(conn, business_id, &purchase_id)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PurchaseReceiptItemInput {
+    pub purchase_item_id: String,
+    pub quantity: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PurchaseReceipt {
+    pub id: String,
+    pub purchase_id: String,
+    pub status: String,
+    pub delivery_reference: Option<String>,
+    pub total_cost: i64,
+    pub created_at: String,
+}
+
+pub fn receive_purchase_delivery(
+    conn: &Connection,
+    business_id: &str,
+    purchase_id: &str,
+    items: &[PurchaseReceiptItemInput],
+    delivery_reference: Option<&str>,
+    notes: Option<&str>,
+) -> Result<PurchaseReceipt, DbError> {
+    if items.is_empty() || items.len() > 100 {
+        return Err(DbError::InvalidInput(
+            "receive between 1 and 100 purchase lines at a time".to_string(),
+        ));
+    }
+    let delivery_reference = delivery_reference
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if delivery_reference.is_some_and(|value| value.chars().count() > 200) {
+        return Err(DbError::InvalidInput(
+            "delivery reference must be 200 characters or fewer".to_string(),
+        ));
+    }
+    let notes = notes.map(str::trim).filter(|value| !value.is_empty());
+    if notes.is_some_and(|value| value.chars().count() > 500) {
+        return Err(DbError::InvalidInput(
+            "receiving notes must be 500 characters or fewer".to_string(),
+        ));
+    }
+    let mut seen_items = HashSet::with_capacity(items.len());
+    for item in items {
+        if item.quantity <= 0 {
+            return Err(DbError::InvalidInput(
+                "received quantity must be greater than zero".to_string(),
+            ));
+        }
+        if !seen_items.insert(item.purchase_item_id.as_str()) {
+            return Err(DbError::InvalidInput(
+                "a purchase line can only appear once per delivery".to_string(),
+            ));
+        }
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let status: Option<String> = tx
+        .query_row(
+            "SELECT status FROM purchases WHERE id = ?1 AND business_id = ?2",
+            params![purchase_id, business_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if status.is_none() {
+        return Err(DbError::InvalidInput(
+            "purchase does not belong to this business".to_string(),
+        ));
+    }
+    let invoice_number: String = tx.query_row(
+        "SELECT supplier_invoice_number FROM purchases WHERE id = ?1",
+        params![purchase_id],
+        |row| row.get(0),
+    )?;
+    let receipt_id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    tx.execute(
+        "INSERT INTO purchase_receipts
+            (id, business_id, purchase_id, delivery_reference, notes, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            receipt_id,
+            business_id,
+            purchase_id,
+            delivery_reference,
+            notes,
+            timestamp
+        ],
+    )?;
+
+    let mut total_cost = 0_i64;
+    for item in items {
+        let line: Option<(String, String, i64, i64, i64, i64, i64)> = tx
+            .query_row(
+                "SELECT pi.product_id, pi.product_name, pi.ordered_quantity,
+                        pi.received_quantity, pi.unit_cost, u.decimals_ok,
+                        COALESCE(ib.quantity_on_hand, 0)
+                 FROM purchase_items pi
+                 JOIN products p ON p.id = pi.product_id AND p.business_id = pi.business_id
+                 JOIN units u ON u.id = p.base_unit_id
+                 LEFT JOIN inventory_balances ib
+                   ON ib.product_id = pi.product_id AND ib.business_id = pi.business_id
+                 WHERE pi.id = ?1 AND pi.business_id = ?2 AND pi.purchase_id = ?3",
+                params![item.purchase_item_id, business_id, purchase_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (
+            product_id,
+            product_name,
+            ordered_quantity,
+            previously_received,
+            unit_cost,
+            allows_decimals,
+            previous_quantity,
+        ) = line.ok_or_else(|| {
+            DbError::InvalidInput("a selected purchase line does not belong to this invoice".into())
+        })?;
+        if allows_decimals == 0 && item.quantity % 1000 != 0 {
+            return Err(DbError::InvalidInput(format!(
+                "{product_name} only allows whole base units"
+            )));
+        }
+        let remaining_quantity = ordered_quantity - previously_received;
+        if item.quantity > remaining_quantity {
+            return Err(DbError::InvalidInput(format!(
+                "received quantity exceeds the {remaining_quantity} remaining for {product_name}"
+            )));
+        }
+        let new_quantity = previous_quantity
+            .checked_add(item.quantity)
+            .ok_or_else(|| {
+                DbError::InvalidInput("received quantity exceeds the supported stock limit".into())
+            })?;
+        let previous_average_unit_cost: i64 = tx
+            .query_row(
+                "SELECT average_unit_cost FROM inventory_balances
+                 WHERE product_id = ?1 AND business_id = ?2",
+                params![product_id, business_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(unit_cost);
+        let average_unit_cost = if previous_quantity == 0 {
+            unit_cost
+        } else {
+            let previous_value = i128::from(previous_quantity)
+                .checked_mul(i128::from(previous_average_unit_cost))
+                .ok_or_else(|| {
+                    DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+                })?;
+            let received_value = i128::from(item.quantity)
+                .checked_mul(i128::from(unit_cost))
+                .ok_or_else(|| {
+                    DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+                })?;
+            let weighted_value = previous_value.checked_add(received_value).ok_or_else(|| {
+                DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+            })?;
+            let average = weighted_value
+                .checked_add(i128::from(new_quantity / 2))
+                .ok_or_else(|| {
+                    DbError::InvalidInput("stock valuation exceeds the supported limit".into())
+                })?
+                / i128::from(new_quantity);
+            i64::try_from(average).map_err(|_| {
+                DbError::InvalidInput("average unit cost exceeds the supported limit".into())
+            })?
+        };
+        let line_cost = stock_value(item.quantity, unit_cost)?;
+        total_cost = total_cost.checked_add(line_cost).ok_or_else(|| {
+            DbError::InvalidInput("delivery total exceeds the supported limit".into())
+        })?;
+        tx.execute(
+            "INSERT INTO inventory_balances
+                (product_id, business_id, quantity_on_hand, average_unit_cost, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(product_id) DO UPDATE SET
+                 quantity_on_hand = excluded.quantity_on_hand,
+                 average_unit_cost = excluded.average_unit_cost,
+                 updated_at = excluded.updated_at",
+            params![
+                product_id,
+                business_id,
+                new_quantity,
+                average_unit_cost,
+                timestamp
+            ],
+        )?;
+        let new_received = previously_received
+            .checked_add(item.quantity)
+            .ok_or_else(|| {
+                DbError::InvalidInput("received quantity exceeds the supported limit".into())
+            })?;
+        let updated = tx.execute(
+            "UPDATE purchase_items SET received_quantity = ?1
+             WHERE id = ?2 AND business_id = ?3 AND purchase_id = ?4
+               AND received_quantity = ?5 AND ordered_quantity >= ?1",
+            params![
+                new_received,
+                item.purchase_item_id,
+                business_id,
+                purchase_id,
+                previously_received
+            ],
+        )?;
+        if updated != 1 {
+            return Err(DbError::InvalidInput(format!(
+                "purchase quantity changed while receiving {product_name}"
+            )));
+        }
+        tx.execute(
+            "INSERT INTO purchase_receipt_items
+                (id, business_id, receipt_id, purchase_item_id, quantity, unit_cost, total_cost)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                business_id,
+                receipt_id,
+                item.purchase_item_id,
+                item.quantity,
+                unit_cost,
+                line_cost
+            ],
+        )?;
+        let movement_reason = notes
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Supplier invoice {invoice_number}"));
+        tx.execute(
+            "INSERT INTO stock_movements
+                (id, business_id, product_id, movement_type, quantity_delta, unit_cost,
+                 total_cost, previous_quantity, new_quantity, reference_type, reference_id,
+                 reason, created_at)
+             VALUES (?1, ?2, ?3, 'purchase_received', ?4, ?5, ?6, ?7, ?8,
+                     'purchase_receipt', ?9, ?10, ?11)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                business_id,
+                product_id,
+                item.quantity,
+                unit_cost,
+                line_cost,
+                previous_quantity,
+                new_quantity,
+                receipt_id,
+                movement_reason,
+                timestamp
+            ],
+        )?;
+    }
+    let (all_received, any_received): (i64, i64) = tx.query_row(
+        "SELECT
+            SUM(CASE WHEN received_quantity = ordered_quantity THEN 1 ELSE 0 END),
+            SUM(CASE WHEN received_quantity > 0 THEN 1 ELSE 0 END)
+         FROM purchase_items WHERE purchase_id = ?1",
+        params![purchase_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let item_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM purchase_items WHERE purchase_id = ?1",
+        params![purchase_id],
+        |row| row.get(0),
+    )?;
+    let purchase_status = if all_received == item_count {
+        "received"
+    } else if any_received > 0 {
+        "partially_received"
+    } else {
+        "pending"
+    };
+    tx.execute(
+        "UPDATE purchases SET status = ?1, updated_at = ?2 WHERE id = ?3 AND business_id = ?4",
+        params![purchase_status, timestamp, purchase_id, business_id],
+    )?;
+    tx.commit()?;
+
+    Ok(PurchaseReceipt {
+        id: receipt_id,
+        purchase_id: purchase_id.to_string(),
+        status: purchase_status.to_string(),
+        delivery_reference: delivery_reference.map(str::to_string),
+        total_cost,
+        created_at: timestamp,
     })
 }
 
@@ -3493,6 +4167,239 @@ mod tests {
                 .items[0]
                 .quantity_on_hand,
             0
+        );
+    }
+
+    #[test]
+    fn purchase_invoice_does_not_add_stock_and_duplicate_requires_authorization() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let supplier = create_supplier(
+            &conn,
+            &business.id,
+            "Kigali Building Supplies",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let product = create_test_product(&conn, &business.id, "PURCHASE-INVOICE-01");
+        let items = [PurchaseItemInput {
+            product_id: product.id.clone(),
+            ordered_quantity: 5_000,
+            unit_cost: 20_000,
+        }];
+
+        let purchase = create_purchase(
+            &conn,
+            &business.id,
+            &supplier.id,
+            " INV-2026-001 ",
+            &items,
+            false,
+        )
+        .unwrap();
+        assert_eq!(purchase.status, "pending");
+        assert_eq!(purchase.supplier_invoice_number, "INV-2026-001");
+        assert_eq!(purchase.subtotal, 100_000);
+        assert_eq!(
+            list_inventory(&conn, &business.id, Some("PURCHASE-INVOICE-01"), 0, 20)
+                .unwrap()
+                .items[0]
+                .quantity_on_hand,
+            0
+        );
+        assert!(matches!(
+            create_purchase(
+                &conn,
+                &business.id,
+                &supplier.id,
+                "inv-2026-001",
+                &items,
+                false
+            ),
+            Err(DbError::InvalidInput(message)) if message.contains("DUPLICATE_PURCHASE_INVOICE:")
+        ));
+
+        let duplicate = create_purchase(
+            &conn,
+            &business.id,
+            &supplier.id,
+            "INV-2026-001",
+            &items,
+            true,
+        )
+        .unwrap();
+        assert!(duplicate.duplicate_authorized);
+        assert_eq!(
+            duplicate.duplicate_of_purchase_id.as_deref(),
+            Some(purchase.id.as_str())
+        );
+        assert_eq!(list_purchases(&conn, &business.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn purchase_delivery_is_atomic_and_supports_partial_receipts() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let supplier = create_supplier(
+            &conn,
+            &business.id,
+            "Kigali Building Supplies",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let first = create_test_product(&conn, &business.id, "PURCHASE-RECEIPT-01");
+        let second = create_test_product(&conn, &business.id, "PURCHASE-RECEIPT-02");
+        let purchase = create_purchase(
+            &conn,
+            &business.id,
+            &supplier.id,
+            "INV-RECEIPT-01",
+            &[
+                PurchaseItemInput {
+                    product_id: first.id.clone(),
+                    ordered_quantity: 5_000,
+                    unit_cost: 20_000,
+                },
+                PurchaseItemInput {
+                    product_id: second.id.clone(),
+                    ordered_quantity: 3_000,
+                    unit_cost: 30_000,
+                },
+            ],
+            false,
+        )
+        .unwrap();
+        let first_item = purchase
+            .items
+            .iter()
+            .find(|item| item.product_id == first.id)
+            .unwrap();
+        let second_item = purchase
+            .items
+            .iter()
+            .find(|item| item.product_id == second.id)
+            .unwrap();
+
+        assert!(matches!(
+            receive_purchase_delivery(
+                &conn,
+                &business.id,
+                &purchase.id,
+                &[
+                    PurchaseReceiptItemInput {
+                        purchase_item_id: first_item.id.clone(),
+                        quantity: 2_000,
+                    },
+                    PurchaseReceiptItemInput {
+                        purchase_item_id: second_item.id.clone(),
+                        quantity: 4_000,
+                    },
+                ],
+                None,
+                None,
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert_eq!(
+            list_inventory(&conn, &business.id, Some("PURCHASE-RECEIPT-01"), 0, 20)
+                .unwrap()
+                .items[0]
+                .quantity_on_hand,
+            0
+        );
+        let receipt_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM purchase_receipts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(receipt_count, 0);
+
+        let first_delivery = receive_purchase_delivery(
+            &conn,
+            &business.id,
+            &purchase.id,
+            &[PurchaseReceiptItemInput {
+                purchase_item_id: first_item.id.clone(),
+                quantity: 2_000,
+            }],
+            Some("DN-01"),
+            Some("First partial delivery"),
+        )
+        .unwrap();
+        assert_eq!(first_delivery.status, "partially_received");
+        assert_eq!(first_delivery.total_cost, 40_000);
+        assert_eq!(
+            list_inventory(&conn, &business.id, Some("PURCHASE-RECEIPT-01"), 0, 20)
+                .unwrap()
+                .items[0]
+                .quantity_on_hand,
+            2_000
+        );
+
+        let final_delivery = receive_purchase_delivery(
+            &conn,
+            &business.id,
+            &purchase.id,
+            &[
+                PurchaseReceiptItemInput {
+                    purchase_item_id: first_item.id.clone(),
+                    quantity: 3_000,
+                },
+                PurchaseReceiptItemInput {
+                    purchase_item_id: second_item.id.clone(),
+                    quantity: 3_000,
+                },
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(final_delivery.status, "received");
+        assert_eq!(final_delivery.total_cost, 150_000);
+        let updated = load_purchase(&conn, &business.id, &purchase.id).unwrap();
+        assert_eq!(updated.status, "received");
+        assert!(
+            updated
+                .items
+                .iter()
+                .all(|item| item.received_quantity == item.ordered_quantity)
+        );
+        assert_eq!(updated.deliveries.len(), 2);
+        let first_delivery_log = updated
+            .deliveries
+            .iter()
+            .find(|delivery| delivery.delivery_reference.as_deref() == Some("DN-01"))
+            .unwrap();
+        assert_eq!(first_delivery_log.total_cost, 40_000);
+        assert_eq!(
+            list_inventory(&conn, &business.id, Some("PURCHASE-RECEIPT-01"), 0, 20)
+                .unwrap()
+                .items[0]
+                .quantity_on_hand,
+            5_000
+        );
+        assert_eq!(
+            list_inventory(&conn, &business.id, Some("PURCHASE-RECEIPT-02"), 0, 20)
+                .unwrap()
+                .items[0]
+                .quantity_on_hand,
+            3_000
+        );
+        assert_eq!(
+            list_stock_movements(&conn, &business.id, Some(&first.id), 0, 20)
+                .unwrap()
+                .iter()
+                .filter(|movement| movement.movement_type == "purchase_received")
+                .count(),
+            2
         );
     }
 

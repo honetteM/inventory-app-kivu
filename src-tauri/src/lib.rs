@@ -167,6 +167,72 @@ fn supplier_update(
 }
 
 #[tauri::command]
+fn purchase_product_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::PurchaseProduct>, String> {
+    state
+        .with(|conn| db::list_purchase_products(conn, &business_id))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn purchase_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::Purchase>, String> {
+    state
+        .with(|conn| db::list_purchases(conn, &business_id))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn purchase_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    supplier_id: String,
+    supplier_invoice_number: String,
+    items: Vec<db::PurchaseItemInput>,
+    authorize_duplicate: bool,
+) -> Result<db::Purchase, String> {
+    state
+        .with(|conn| {
+            db::create_purchase(
+                conn,
+                &business_id,
+                &supplier_id,
+                &supplier_invoice_number,
+                &items,
+                authorize_duplicate,
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn purchase_receive_delivery(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    purchase_id: String,
+    items: Vec<db::PurchaseReceiptItemInput>,
+    delivery_reference: Option<String>,
+    notes: Option<String>,
+) -> Result<db::PurchaseReceipt, String> {
+    state
+        .with(|conn| {
+            db::receive_purchase_delivery(
+                conn,
+                &business_id,
+                &purchase_id,
+                &items,
+                delivery_reference.as_deref(),
+                notes.as_deref(),
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn product_list(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -409,6 +475,10 @@ pub fn run() {
             supplier_list,
             supplier_create,
             supplier_update,
+            purchase_product_list,
+            purchase_list,
+            purchase_create,
+            purchase_receive_delivery,
             product_list,
             pos_product_search,
             pos_checkout,
