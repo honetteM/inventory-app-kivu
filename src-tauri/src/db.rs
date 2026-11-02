@@ -4636,7 +4636,9 @@ fn load_purchase(
 
 pub fn list_purchases(conn: &Connection, business_id: &str) -> Result<Vec<Purchase>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT id FROM purchases WHERE business_id = ?1 ORDER BY created_at DESC, id LIMIT 200",
+        "SELECT id FROM purchases
+         WHERE business_id = ?1 AND status != 'received'
+         ORDER BY created_at DESC, id LIMIT 200",
     )?;
     let purchase_ids = stmt
         .query_map(params![business_id], |row| row.get::<_, String>(0))?
@@ -4645,6 +4647,108 @@ pub fn list_purchases(conn: &Connection, business_id: &str) -> Result<Vec<Purcha
         .iter()
         .map(|purchase_id| load_purchase(conn, business_id, purchase_id))
         .collect()
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct PurchaseHistoryPage {
+    pub items: Vec<Purchase>,
+    pub total_count: i64,
+    pub purchase_total: i64,
+    pub paid_total: i64,
+    pub balance_due_total: i64,
+}
+
+pub fn list_purchase_history(
+    conn: &Connection,
+    business_id: &str,
+    search: Option<&str>,
+    from_date: Option<&str>,
+    to_date: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> Result<PurchaseHistoryPage, DbError> {
+    if offset < 0 || !(1..=100).contains(&limit) {
+        return Err(DbError::InvalidInput(
+            "purchase history pagination must use a non-negative offset and a limit from 1 to 100"
+                .to_string(),
+        ));
+    }
+    for date in [from_date, to_date].into_iter().flatten() {
+        let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|_| DbError::InvalidInput("enter a valid purchase date".to_string()))?;
+        if parsed.format("%Y-%m-%d").to_string() != date {
+            return Err(DbError::InvalidInput(
+                "enter a valid purchase date".to_string(),
+            ));
+        }
+    }
+    if matches!((from_date, to_date), (Some(from), Some(to)) if from > to) {
+        return Err(DbError::InvalidInput(
+            "purchase start date cannot be after its end date".to_string(),
+        ));
+    }
+    let pattern = search
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            format!(
+                "%{}%",
+                value
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            )
+        });
+    let filter = "p.business_id = ?1 AND p.status = 'received'
+        AND (?2 IS NULL OR
+             s.name LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+             p.supplier_invoice_number LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+             EXISTS (SELECT 1 FROM purchase_items pi
+                     WHERE pi.purchase_id = p.id AND pi.business_id = p.business_id
+                       AND (pi.product_name LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+                            OR pi.sku LIKE ?2 ESCAPE '\\' COLLATE NOCASE)) OR
+             EXISTS (SELECT 1 FROM purchase_receipts pr
+                     WHERE pr.purchase_id = p.id AND pr.business_id = p.business_id
+                       AND COALESCE(pr.delivery_reference, '') LIKE ?2 ESCAPE '\\' COLLATE NOCASE))
+        AND (?3 IS NULL OR substr(p.created_at, 1, 10) >= ?3)
+        AND (?4 IS NULL OR substr(p.created_at, 1, 10) <= ?4)";
+    let total_count: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM purchases p JOIN suppliers s ON s.id = p.supplier_id AND s.business_id = p.business_id WHERE {filter}"),
+        params![business_id, pattern, from_date, to_date],
+        |row| row.get(0),
+    )?;
+    let totals: (i64, i64) = conn.query_row(
+        &format!("SELECT COALESCE(SUM(p.subtotal), 0), COALESCE(SUM((SELECT COALESCE(SUM(pp.amount), 0) FROM purchase_payments pp WHERE pp.purchase_id = p.id)), 0)
+                  FROM purchases p JOIN suppliers s ON s.id = p.supplier_id AND s.business_id = p.business_id WHERE {filter}"),
+        params![business_id, pattern, from_date, to_date],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT p.id FROM purchases p
+         JOIN suppliers s ON s.id = p.supplier_id AND s.business_id = p.business_id
+         WHERE {filter}
+         ORDER BY p.created_at DESC, p.id DESC LIMIT ?5 OFFSET ?6"
+    ))?;
+    let ids = stmt
+        .query_map(
+            params![business_id, pattern, from_date, to_date, limit, offset],
+            |row| row.get::<_, String>(0),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let items = ids
+        .iter()
+        .map(|id| load_purchase(conn, business_id, id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let paid_total = totals.1;
+    Ok(PurchaseHistoryPage {
+        items,
+        total_count,
+        purchase_total: totals.0,
+        paid_total,
+        balance_due_total: totals.0.checked_sub(paid_total).ok_or_else(|| {
+            DbError::InvalidInput("supplier payments exceed purchase totals".to_string())
+        })?,
+    })
 }
 
 pub fn record_purchase_payment_as_user(
@@ -10724,6 +10828,21 @@ mod tests {
                 .all(|item| item.received_quantity == item.ordered_quantity)
         );
         assert_eq!(updated.deliveries.len(), 2);
+        assert!(list_purchases(&conn, &business.id).unwrap().is_empty());
+        let history =
+            list_purchase_history(&conn, &business.id, Some("DN-01"), None, None, 0, 20).unwrap();
+        assert_eq!(history.total_count, 1);
+        assert_eq!(history.purchase_total, 190_000);
+        assert_eq!(history.paid_total, 0);
+        assert_eq!(history.balance_due_total, 190_000);
+        assert_eq!(
+            history.items[0]
+                .items
+                .iter()
+                .map(|item| item.received_quantity)
+                .sum::<i64>(),
+            8_000
+        );
         let first_delivery_log = updated
             .deliveries
             .iter()

@@ -7,6 +7,7 @@ import {
   Landmark,
   Package,
   ReceiptText,
+  History,
   Settings,
   ShoppingCart,
   Truck,
@@ -37,6 +38,7 @@ export const navGroups: NavGroup[] = [
       { title: "Products", url: "/products", icon: Package, permission: "catalog.read" },
       { title: "Inventory", url: "/inventory", icon: Boxes, permission: "inventory.read" },
       { title: "Purchases", url: "/purchases", icon: Truck, permission: "purchases.read" },
+      { title: "Purchase History", url: "/purchase-history", icon: History, permission: "purchases.read" },
     ],
   },
   {

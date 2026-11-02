@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { Link } from "react-router-dom";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { AlertTriangle, CreditCard, LoaderCircle, PackagePlus, ReceiptText, Truck } from "lucide-react";
+import { AlertTriangle, CreditCard, History, LoaderCircle, PackagePlus, ReceiptText, Truck } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -757,9 +758,14 @@ export function PurchasesPage() {
 
           <section className="space-y-4">
             <div>
-              <h2 className="text-xl font-semibold">Purchase history</h2>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-xl font-semibold">Active purchases</h2>
+                <Button variant="outline" size="sm" asChild>
+                  <Link to="/purchase-history"><History /> Purchase history</Link>
+                </Button>
+              </div>
               <p className="text-sm text-muted-foreground">
-                Receiving a delivery updates stock only for the quantities recorded in that delivery.
+                Unfinished invoices remain here until all ordered goods are received. Fully received purchases are in Purchase History.
               </p>
             </div>
             {isLoadingData ? (
