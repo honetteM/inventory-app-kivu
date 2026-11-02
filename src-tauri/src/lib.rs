@@ -151,6 +151,31 @@ fn employee_set_active(
 }
 
 #[tauri::command]
+fn manager_permission_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::RolePermissionSetting>, String> {
+    state
+        .with_business_permission(&business_id, db::PERMISSION_ROLES_MANAGE, |conn, _| {
+            db::list_manager_permissions(conn, &business_id)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn manager_permission_update(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    grants: Vec<db::RolePermissionGrant>,
+) -> Result<Vec<db::RolePermissionSetting>, String> {
+    state
+        .with_business_permission(&business_id, db::PERMISSION_ROLES_MANAGE, |conn, actor| {
+            db::update_manager_permissions(conn, &business_id, actor, &grants)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn auth_logout(state: tauri::State<db::DbState>) -> Result<(), String> {
     state.clear_session().map_err(|error| error.to_string())
 }
@@ -605,9 +630,11 @@ fn customer_debt_list(
     business_id: String,
 ) -> Result<Vec<db::CustomerDebt>, String> {
     state
-        .with_business_permission(&business_id, db::PERMISSION_FINANCE_READ, |conn, _| {
-            db::list_customer_debts(conn, &business_id)
-        })
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_CUSTOMER_DEBTS_READ,
+            |conn, _| db::list_customer_debts(conn, &business_id),
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -687,9 +714,19 @@ fn customer_debt_record_payment(
     amount: i64,
 ) -> Result<db::CustomerDebtPayment, String> {
     state
-        .with_business_permission(&business_id, db::PERMISSION_FINANCE_MANAGE, |conn, _| {
-            db::record_customer_debt_payment(conn, &business_id, &debt_id, &payment_method, amount)
-        })
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_CUSTOMER_PAYMENTS_MANAGE,
+            |conn, _| {
+                db::record_customer_debt_payment(
+                    conn,
+                    &business_id,
+                    &debt_id,
+                    &payment_method,
+                    amount,
+                )
+            },
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -900,6 +937,8 @@ pub fn run() {
             employee_list,
             employee_create,
             employee_set_active,
+            manager_permission_list,
+            manager_permission_update,
             auth_logout,
             auth_current_user,
             db_info,

@@ -76,6 +76,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "016_role_permissions",
         include_str!("../migrations/016_role_permissions.sql"),
     ),
+    (
+        17,
+        "017_manager_permissions",
+        include_str!("../migrations/017_manager_permissions.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -105,6 +110,8 @@ pub const PERMISSION_SUPPLIERS_READ: &str = "suppliers.read";
 pub const PERMISSION_SUPPLIERS_MANAGE: &str = "suppliers.manage";
 pub const PERMISSION_CUSTOMERS_READ: &str = "customers.read";
 pub const PERMISSION_CUSTOMERS_MANAGE: &str = "customers.manage";
+pub const PERMISSION_CUSTOMER_DEBTS_READ: &str = "customer_debts.read";
+pub const PERMISSION_CUSTOMER_PAYMENTS_MANAGE: &str = "customer_payments.manage";
 pub const PERMISSION_POS_USE: &str = "pos.use";
 pub const PERMISSION_SALES_MANAGE: &str = "sales.manage";
 pub const PERMISSION_PURCHASES_READ: &str = "purchases.read";
@@ -112,6 +119,43 @@ pub const PERMISSION_PURCHASES_MANAGE: &str = "purchases.manage";
 pub const PERMISSION_FINANCE_READ: &str = "finance.read";
 pub const PERMISSION_FINANCE_MANAGE: &str = "finance.manage";
 pub const PERMISSION_REPORTS_READ: &str = "reports.read";
+pub const PERMISSION_ROLES_MANAGE: &str = "roles.manage";
+
+const MANAGER_PERMISSION_IDS: &[&str] = &[
+    PERMISSION_SYSTEM_READ,
+    PERMISSION_BUSINESS_READ,
+    PERMISSION_CATALOG_READ,
+    PERMISSION_INVENTORY_READ,
+    PERMISSION_INVENTORY_MANAGE,
+    PERMISSION_SUPPLIERS_READ,
+    PERMISSION_SUPPLIERS_MANAGE,
+    PERMISSION_CUSTOMERS_READ,
+    PERMISSION_CUSTOMERS_MANAGE,
+    PERMISSION_CUSTOMER_DEBTS_READ,
+    PERMISSION_CUSTOMER_PAYMENTS_MANAGE,
+    PERMISSION_POS_USE,
+    PERMISSION_SALES_MANAGE,
+    PERMISSION_PURCHASES_READ,
+    PERMISSION_PURCHASES_MANAGE,
+];
+
+const DEFAULT_MANAGER_PERMISSION_IDS: &[&str] = &[
+    PERMISSION_SYSTEM_READ,
+    PERMISSION_BUSINESS_READ,
+    PERMISSION_CATALOG_READ,
+    PERMISSION_INVENTORY_READ,
+    PERMISSION_INVENTORY_MANAGE,
+    PERMISSION_SUPPLIERS_READ,
+    PERMISSION_SUPPLIERS_MANAGE,
+    PERMISSION_CUSTOMERS_READ,
+    PERMISSION_CUSTOMERS_MANAGE,
+    PERMISSION_CUSTOMER_DEBTS_READ,
+    PERMISSION_CUSTOMER_PAYMENTS_MANAGE,
+    PERMISSION_POS_USE,
+    PERMISSION_SALES_MANAGE,
+    PERMISSION_PURCHASES_READ,
+    PERMISSION_PURCHASES_MANAGE,
+];
 
 /// Application state holding the single SQLite connection.
 pub struct DbState {
@@ -521,6 +565,21 @@ pub struct Employee {
     pub created_at: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RolePermissionSetting {
+    pub permission_id: String,
+    pub description: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RolePermissionGrant {
+    pub permission_id: String,
+    pub enabled: bool,
+}
+
 #[derive(Debug)]
 pub struct AuthCredentials {
     pub user: AuthUser,
@@ -885,6 +944,142 @@ pub fn list_employees(conn: &Connection, business_id: &str) -> Result<Vec<Employ
     Ok(employees)
 }
 
+fn ensure_manager_role(
+    conn: &Connection,
+    business_id: &str,
+    timestamp: &str,
+) -> Result<(String, bool), DbError> {
+    let created = conn.execute(
+        "INSERT INTO roles (id, business_id, name, display_name, is_system, created_at, updated_at)
+         VALUES (?1, ?2, 'manager', 'Manager', 1, ?3, ?3)
+         ON CONFLICT (business_id, name) DO NOTHING",
+        params![uuid::Uuid::new_v4().to_string(), business_id, timestamp],
+    )? == 1;
+    let role_id = conn.query_row(
+        "SELECT id FROM roles WHERE business_id = ?1 AND name = 'manager'",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    Ok((role_id, created))
+}
+
+fn grant_default_manager_permissions(conn: &Connection, role_id: &str) -> Result<(), DbError> {
+    for permission_id in DEFAULT_MANAGER_PERMISSION_IDS {
+        conn.execute(
+            "INSERT OR IGNORE INTO role_permissions (role_id, permission_id)
+             SELECT ?1, id FROM permissions WHERE id = ?2",
+            params![role_id, permission_id],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn list_manager_permissions(
+    conn: &Connection,
+    business_id: &str,
+) -> Result<Vec<RolePermissionSetting>, DbError> {
+    let mut settings = Vec::with_capacity(MANAGER_PERMISSION_IDS.len());
+    let manager_role_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM roles WHERE business_id = ?1 AND name = 'manager')",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    for permission_id in MANAGER_PERMISSION_IDS {
+        let setting = conn
+            .query_row(
+                "SELECT p.description,
+                        EXISTS(
+                            SELECT 1 FROM roles r
+                            JOIN role_permissions rp ON rp.role_id = r.id
+                            WHERE r.business_id = ?1 AND r.name = 'manager'
+                              AND rp.permission_id = p.id
+                        )
+                 FROM permissions p WHERE p.id = ?2",
+                params![business_id, permission_id],
+                |row| -> rusqlite::Result<RolePermissionSetting> {
+                    Ok(RolePermissionSetting {
+                        permission_id: (*permission_id).to_string(),
+                        description: row.get(0)?,
+                        enabled: if manager_role_exists {
+                            row.get(1)?
+                        } else {
+                            DEFAULT_MANAGER_PERMISSION_IDS.contains(permission_id)
+                        },
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                DbError::InvalidInput(format!("permission catalogue is missing {permission_id}"))
+            })?;
+        settings.push(setting);
+    }
+    Ok(settings)
+}
+
+pub fn update_manager_permissions(
+    conn: &Connection,
+    business_id: &str,
+    actor: &AuthUser,
+    grants: &[RolePermissionGrant],
+) -> Result<Vec<RolePermissionSetting>, DbError> {
+    if actor.role != "owner" || actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "only the owner/admin can configure Manager permissions".to_string(),
+        ));
+    }
+    require_permission(conn, actor, PERMISSION_ROLES_MANAGE)?;
+    if grants.len() != MANAGER_PERMISSION_IDS.len() {
+        return Err(DbError::InvalidInput(
+            "submit the complete Manager permission set".to_string(),
+        ));
+    }
+    let unique_ids = grants
+        .iter()
+        .map(|grant| grant.permission_id.as_str())
+        .collect::<HashSet<_>>();
+    if unique_ids.len() != MANAGER_PERMISSION_IDS.len()
+        || MANAGER_PERMISSION_IDS
+            .iter()
+            .any(|permission_id| !unique_ids.contains(permission_id))
+    {
+        return Err(DbError::InvalidInput(
+            "Manager permissions contain unknown or duplicate capabilities".to_string(),
+        ));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let timestamp = now_utc();
+    let (manager_role_id, _) = ensure_manager_role(&tx, business_id, &timestamp)?;
+    tx.execute(
+        "DELETE FROM role_permissions WHERE role_id = ?1",
+        params![manager_role_id],
+    )?;
+    let mut enabled = Vec::new();
+    for grant in grants.iter().filter(|grant| grant.enabled) {
+        tx.execute(
+            "INSERT INTO role_permissions (role_id, permission_id) VALUES (?1, ?2)",
+            params![manager_role_id, grant.permission_id],
+        )?;
+        enabled.push(grant.permission_id.as_str());
+    }
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'manager_permissions_updated', 'role', ?4, ?5, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            actor.id,
+            manager_role_id,
+            format!("enabled={}", enabled.join(",")),
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    list_manager_permissions(conn, business_id)
+}
+
 pub fn create_employee(
     conn: &Connection,
     business_id: &str,
@@ -899,9 +1094,10 @@ pub fn create_employee(
             "an owner signed in to this business is required".to_string(),
         ));
     }
-    if !matches!(role, "manager" | "cashier") {
+    if role != "manager" {
         return Err(DbError::InvalidInput(
-            "select a supported employee role".to_string(),
+            "only Manager profiles can be created; Owner/Admin is the full-access account"
+                .to_string(),
         ));
     }
     if password_hash.trim().is_empty() {
@@ -912,23 +1108,10 @@ pub fn create_employee(
     let (username, full_name) = validate_auth_identity(username, full_name)?;
     let tx = conn.unchecked_transaction()?;
     let timestamp = now_utc();
-    let role_id = uuid::Uuid::new_v4().to_string();
-    let display_name = if role == "manager" {
-        "Manager"
-    } else {
-        "Cashier"
-    };
-    tx.execute(
-        "INSERT INTO roles (id, business_id, name, display_name, is_system, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)
-         ON CONFLICT (business_id, name) DO NOTHING",
-        params![role_id, business_id, role, display_name, timestamp],
-    )?;
-    let role_id: String = tx.query_row(
-        "SELECT id FROM roles WHERE business_id = ?1 AND name = ?2",
-        params![business_id, role],
-        |row| row.get(0),
-    )?;
+    let (role_id, manager_role_created) = ensure_manager_role(&tx, business_id, &timestamp)?;
+    if manager_role_created {
+        grant_default_manager_permissions(&tx, &role_id)?;
+    }
     let user_id = uuid::Uuid::new_v4().to_string();
     tx.execute(
         "INSERT INTO users
@@ -5522,10 +5705,66 @@ mod tests {
             "$argon2id$owner-hash",
         )
         .unwrap();
+        let employee = create_employee(
+            &conn,
+            &business.id,
+            &owner,
+            "manager.one",
+            "Manager One",
+            "manager",
+            "$argon2id$manager-hash",
+        )
+        .unwrap();
+        let manager = AuthUser {
+            id: employee.id,
+            business_id: employee.business_id,
+            username: employee.username,
+            full_name: employee.full_name,
+            role: employee.role,
+        };
+        let (version, name, migration) = MIGRATIONS
+            .iter()
+            .find(|(version, _, _)| *version == 16)
+            .unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute_batch(migration).unwrap();
+        tx.execute(
+            "INSERT INTO schema_migrations (version, name, applied_at)
+             VALUES (?1, ?2, ?3)",
+            params![version, name, now_utc()],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let cashier_role_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO roles (id, business_id, name, display_name, is_system, created_at, updated_at)
+             VALUES (?1, ?2, 'cashier', 'Cashier', 1, ?3, ?3)",
+            params![cashier_role_id, business.id, now_utc()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO role_permissions (role_id, permission_id)
+             VALUES (?1, ?2)",
+            params![cashier_role_id, PERMISSION_INVENTORY_READ],
+        )
+        .unwrap();
         run_migrations(&mut conn).unwrap();
 
         require_permission(&conn, &owner, PERMISSION_REPORTS_READ).unwrap();
         require_permission(&conn, &owner, PERMISSION_CASH_ACCOUNTS_MANAGE).unwrap();
+        require_permission(&conn, &manager, PERMISSION_INVENTORY_MANAGE).unwrap();
+        assert!(matches!(
+            require_permission(&conn, &manager, PERMISSION_REPORTS_READ),
+            Err(DbError::InvalidInput(_))
+        ));
+        let cashier_permissions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM role_permissions WHERE role_id = ?1",
+                params![cashier_role_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cashier_permissions, 0);
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM role_permissions rp
@@ -5631,15 +5870,15 @@ mod tests {
             &conn,
             &business.id,
             &owner,
-            "  cashier.one ",
+            "  manager.one ",
             " Jean Niyonzima ",
-            "cashier",
+            "manager",
             "$argon2id$employee-hash",
         )
         .unwrap();
-        assert_eq!(employee.username, "cashier.one");
+        assert_eq!(employee.username, "manager.one");
         assert_eq!(employee.full_name, "Jean Niyonzima");
-        assert_eq!(employee.role, "cashier");
+        assert_eq!(employee.role, "manager");
         assert!(employee.is_active);
         assert_eq!(
             list_employees(&conn, &business.id)
@@ -5663,11 +5902,11 @@ mod tests {
         assert!(matches!(
             create_employee(
                 &conn,
-                &other_business.id,
+                &business.id,
                 &owner,
-                "manager.one",
-                "Manager",
-                "manager",
+                "cashier.one",
+                "Cashier",
+                "cashier",
                 "$argon2id$manager-hash"
             ),
             Err(DbError::InvalidInput(_))
@@ -5702,7 +5941,7 @@ mod tests {
     }
 
     #[test]
-    fn role_permissions_grant_owners_catalog_access_and_deny_ungranted_staff_actions() {
+    fn manager_permissions_are_configurable_without_granting_sensitive_access() {
         let conn = open_in_memory().unwrap();
         let business = create_business(&conn, "Hardware shop", None).unwrap();
         let owner = bootstrap_owner(
@@ -5716,40 +5955,112 @@ mod tests {
         .unwrap();
         require_permission(&conn, &owner, PERMISSION_REPORTS_READ).unwrap();
 
+        require_permission(&conn, &owner, PERMISSION_ROLES_MANAGE).unwrap();
         let employee = create_employee(
             &conn,
             &business.id,
             &owner,
-            "cashier",
+            "manager",
             "Jean Niyonzima",
-            "cashier",
-            "$argon2id$cashier-hash",
+            "manager",
+            "$argon2id$manager-hash",
         )
         .unwrap();
-        let cashier = AuthUser {
+        let manager = AuthUser {
             id: employee.id,
             business_id: employee.business_id,
             username: employee.username,
             full_name: employee.full_name,
             role: employee.role,
         };
+        require_permission(&conn, &manager, PERMISSION_POS_USE).unwrap();
         assert!(matches!(
-            require_permission(&conn, &cashier, PERMISSION_POS_USE),
+            require_permission(&conn, &manager, PERMISSION_REPORTS_READ),
             Err(DbError::InvalidInput(_))
         ));
 
-        conn.execute(
-            "INSERT INTO role_permissions (role_id, permission_id)
-             SELECT r.id, ?1 FROM roles r
-             WHERE r.business_id = ?2 AND r.name = 'cashier'",
-            params![PERMISSION_POS_USE, business.id],
-        )
-        .unwrap();
-        require_permission(&conn, &cashier, PERMISSION_POS_USE).unwrap();
+        let mut grants = list_manager_permissions(&conn, &business.id)
+            .unwrap()
+            .into_iter()
+            .map(|setting| RolePermissionGrant {
+                enabled: setting.enabled && setting.permission_id != PERMISSION_POS_USE,
+                permission_id: setting.permission_id,
+            })
+            .collect::<Vec<_>>();
+        let updated = update_manager_permissions(&conn, &business.id, &owner, &grants).unwrap();
+        assert!(
+            !updated
+                .iter()
+                .find(|setting| setting.permission_id == PERMISSION_POS_USE)
+                .unwrap()
+                .enabled
+        );
         assert!(matches!(
-            require_permission(&conn, &cashier, PERMISSION_REPORTS_READ),
+            require_permission(&conn, &manager, PERMISSION_POS_USE),
             Err(DbError::InvalidInput(_))
         ));
+        assert!(matches!(
+            require_permission(&conn, &manager, PERMISSION_REPORTS_READ),
+            Err(DbError::InvalidInput(_))
+        ));
+        let second_manager = create_employee(
+            &conn,
+            &business.id,
+            &owner,
+            "manager.two",
+            "Second Manager",
+            "manager",
+            "$argon2id$manager-two-hash",
+        )
+        .unwrap();
+        assert!(matches!(
+            require_permission(
+                &conn,
+                &AuthUser {
+                    id: second_manager.id,
+                    business_id: second_manager.business_id,
+                    username: second_manager.username,
+                    full_name: second_manager.full_name,
+                    role: second_manager.role,
+                },
+                PERMISSION_POS_USE
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+
+        grants.push(RolePermissionGrant {
+            permission_id: PERMISSION_REPORTS_READ.to_string(),
+            enabled: true,
+        });
+        assert!(matches!(
+            update_manager_permissions(&conn, &business.id, &owner, &grants),
+            Err(DbError::InvalidInput(_))
+        ));
+        let non_owner = AuthUser {
+            role: "manager".to_string(),
+            ..owner.clone()
+        };
+        let current_grants = list_manager_permissions(&conn, &business.id).unwrap();
+        let current_grants = current_grants
+            .into_iter()
+            .map(|setting| RolePermissionGrant {
+                permission_id: setting.permission_id,
+                enabled: setting.enabled,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            update_manager_permissions(&conn, &business.id, &non_owner, &current_grants).is_err()
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM audit_logs WHERE business_id = ?1
+                 AND user_id = ?2 AND action = 'manager_permissions_updated'",
+                params![business.id, owner.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
     }
 
     #[test]

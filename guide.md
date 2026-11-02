@@ -607,9 +607,9 @@ The cash-account setup screen now lists, creates, activates and deactivates busi
 
 Local owner sign-in now uses Argon2id password hashes and an in-memory session. The first owner can bootstrap a new or existing business; creating another business provisions the same owner credentials in that business. Application data commands require a signed-in owner and are scoped to that owner's selected business.
 
-The Employees screen allows an owner to create and deactivate/reactivate business-scoped Manager and Cashier profiles. Initial passwords are Argon2id-hashed, and profile creation/status changes are audit logged. Migration 016 adds a permission catalogue and grants all current capabilities to owner roles. Every business-scoped Tauri command now checks its read/manage capability server-side. Manager and Cashier profiles receive no capabilities by default, and staff sign-in remains disabled until their permissions are deliberately configured.
+The Employees screen allows an owner to create Manager profiles and deactivate/reactivate existing staff profiles. Initial passwords are Argon2id-hashed, and profile creation/status changes are audit logged. Migrations 016-017 add the permission catalogue and grant all capabilities to Owner/Admin roles. Every business-scoped Tauri command checks its read/manage capability server-side. Owner/Admin access is full and cannot be restricted from the Employees screen. Owners can configure a restricted allowlist of Manager permissions; new and existing Manager roles receive the documented safe defaults. Cashier permissions cannot be configured and Cashier roles receive no capabilities. Manager grants are enforced in backend commands. Staff sign-in remains disabled until its authentication flow is implemented and tested.
 
-Manager/Cashier permission configuration and staff sign-in; posting existing sale, repayment, expense and supplier-payment flows into cash accounts; authenticated cash approvals; opening/closing balances and carry-forward; branch attribution; detailed adjustment reporting; and PDF export remain pending. Cash closing remains disabled until role-specific permission grants and the closing workflow are implemented. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
+Staff sign-in; posting existing sale, repayment, expense and supplier-payment flows into cash accounts; authenticated cash approvals; opening/closing balances and carry-forward; branch attribution; detailed adjustment reporting; and PDF export remain pending. Cash closing remains disabled until its workflow is implemented. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
 
 ---
 
@@ -634,27 +634,14 @@ Full access:
 
 ## Manager
 
-- Manage stock.
-- Manage purchases.
-- Manage sales.
-- Manage customers.
-- View permitted reports.
-- Approve authorized adjustments
+- Owner-configurable, restricted permissions for basic business information, product lookup, inventory, suppliers, customers, customer debt collection, POS, sales and purchases.
+- Default grants include inventory and purchase management, POS and sales, customer/supplier management, and customer debt collection.
+- Financial reports, expenses/finance management, cash-account administration, employee management, business administration and permission management are excluded from the Manager allowlist.
+- Purchase read access includes purchase costs. The owner can disable any allowed Manager permission.
+- Cashier permissions are not configurable and Cashier roles receive no permissions.
+- Manager permission changes are audited and enforced by backend commands.
 
-* Access POS.
-* Search products.
-* Record sales.
-* Record authorized customer payments.
-* Print receipts.
-* View permitted stock information.
-
-Workers must not automatically have access to:
-
-- Purchase costs.
-- Business profit.
-- Owner withdrawals.
-- Sensitive financial reports.
-- Employee permissions.
+Employee sign-in is not enabled. Existing employee profiles do not currently provide application access.
 
 Every important action must record the authenticated user.
 

@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { SelectField } from "@/components/shared/select-field";
 import { Badge } from "@/components/ui/badge";
 import { useAuthentication } from "@/modules/auth/auth-gate";
 
@@ -24,50 +23,76 @@ interface Employee {
   created_at: string;
 }
 
-const ROLES: { value: EmployeeRole; label: string }[] = [
-  { value: "manager", label: "Manager" },
-  { value: "cashier", label: "Cashier" },
-];
+interface RolePermissionSetting {
+  permissionId: string;
+  description: string;
+  enabled: boolean;
+}
+
+const PERMISSION_LABELS: Record<string, string> = {
+  "system.read": "View basic application information",
+  "business.read": "View business profile",
+  "catalog.read": "View products, categories, brands and units",
+  "inventory.read": "View stock and movement history",
+  "inventory.manage": "Receive stock and make stock adjustments",
+  "suppliers.read": "View supplier records",
+  "suppliers.manage": "Add and edit suppliers",
+  "customers.read": "View customer records",
+  "customers.manage": "Add and edit customers",
+  "customer_debts.read": "View customer debts for collection",
+  "customer_payments.manage": "Record customer debt repayments",
+  "pos.use": "Search products and use the point of sale",
+  "sales.manage": "Record sales",
+  "purchases.read": "View purchases and purchase costs",
+  "purchases.manage": "Create purchases, receive deliveries and record supplier payments",
+};
 
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
 function roleLabel(role: EmployeeRole): string {
-  return ROLES.find((item) => item.value === role)?.label ?? role;
+  return role === "manager" ? "Manager" : "Cashier";
 }
 
 export function EmployeesPage() {
   const { user } = useAuthentication();
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [managerPermissions, setManagerPermissions] = useState<RolePermissionSetting[]>([]);
   const [username, setUsername] = useState("");
   const [fullName, setFullName] = useState("");
-  const [role, setRole] = useState<EmployeeRole>("cashier");
   const [password, setPassword] = useState("");
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingPermissions, setIsLoadingPermissions] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isSavingPermissions, setIsSavingPermissions] = useState(false);
   const [savingEmployeeId, setSavingEmployeeId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
-    invoke<Employee[]>("employee_list", { businessId: user.business_id })
-      .then((result) => {
+    Promise.all([
+      invoke<Employee[]>("employee_list", { businessId: user.business_id }),
+      invoke<RolePermissionSetting[]>("manager_permission_list", { businessId: user.business_id }),
+    ])
+      .then(([employeeResult, permissionResult]) => {
         if (active) {
-          setEmployees(result);
+          setEmployees(employeeResult);
+          setManagerPermissions(permissionResult);
           setError(null);
         }
       })
       .catch((cause: unknown) => {
         if (active) {
-          setError(`Could not load employee records. ${errorText(cause)}`);
+          setError(`Could not load employee and permission settings. ${errorText(cause)}`);
         }
       })
       .finally(() => {
         if (active) {
           setIsLoading(false);
+          setIsLoadingPermissions(false);
         }
       });
     return () => {
@@ -90,7 +115,7 @@ export function EmployeesPage() {
         businessId: user.business_id,
         username: username.trim(),
         fullName: fullName.trim(),
-        role,
+        role: "manager",
         password,
       });
       setUsername("");
@@ -102,7 +127,7 @@ export function EmployeesPage() {
           Number(b.is_active) - Number(a.is_active) || a.full_name.localeCompare(b.full_name),
         ),
       );
-      setNotice("Employee profile created and audited. Employee sign-in is not enabled yet.");
+      setNotice("Manager profile created and audited. Employee sign-in is not enabled yet.");
     } catch (cause) {
       setError(`Could not create employee profile. ${errorText(cause)}`);
     } finally {
@@ -135,6 +160,27 @@ export function EmployeesPage() {
     }
   }
 
+  async function saveManagerPermissions() {
+    setError(null);
+    setNotice(null);
+    setIsSavingPermissions(true);
+    try {
+      const updated = await invoke<RolePermissionSetting[]>("manager_permission_update", {
+        businessId: user.business_id,
+        grants: managerPermissions.map(({ permissionId, enabled }) => ({
+          permissionId,
+          enabled,
+        })),
+      });
+      setManagerPermissions(updated);
+      setNotice("Manager permissions saved and recorded in the audit log.");
+    } catch (cause) {
+      setError(`Could not save Manager permissions. ${errorText(cause)}`);
+    } finally {
+      setIsSavingPermissions(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       <PageHeader
@@ -144,7 +190,7 @@ export function EmployeesPage() {
       />
 
       <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm text-foreground">
-        Employee sign-in is not enabled yet. Staff roles do not grant application access until role-specific permissions are implemented.
+        Manager permissions are enforced by the backend. Employee sign-in remains disabled until its authentication flow is implemented and tested.
       </div>
 
       {error ? (
@@ -161,9 +207,76 @@ export function EmployeesPage() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Role access</CardTitle>
+          <CardDescription>
+            Configure only the Manager role. Owner/Admin always retains full access; Cashier permissions are not configurable or granted.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          <div className="rounded-lg border bg-muted/30 p-4">
+            <p className="font-medium">Owner / Admin</p>
+            <p className="mt-1 text-sm text-muted-foreground">Full access to all application capabilities. This role cannot be restricted here.</p>
+          </div>
+          <div className="space-y-3">
+            <div>
+              <p className="font-medium">Manager permissions</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Financial reports, expenses, cash accounts, employee access and business settings are not included in the Manager permission set.
+              </p>
+            </div>
+            {isLoadingPermissions ? (
+              <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+                <LoaderCircle className="size-4 animate-spin" />
+                Loading Manager permissions...
+              </div>
+            ) : (
+              <>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {managerPermissions.map((permission) => (
+                    <label
+                      key={permission.permissionId}
+                      className="flex cursor-pointer items-start gap-3 rounded-md border p-3 text-sm transition-colors hover:bg-muted/40"
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 size-4 accent-primary"
+                        checked={permission.enabled}
+                        disabled={isSavingPermissions}
+                        onChange={(event) => {
+                          const enabled = event.target.checked;
+                          setManagerPermissions((current) =>
+                            current.map((item) =>
+                              item.permissionId === permission.permissionId ? { ...item, enabled } : item,
+                            ),
+                          );
+                        }}
+                      />
+                      <span>
+                        <span className="block font-medium">
+                          {PERMISSION_LABELS[permission.permissionId] ?? permission.description}
+                        </span>
+                        <span className="mt-1 block text-xs text-muted-foreground">{permission.description}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div className="flex justify-end">
+                  <Button type="button" onClick={() => void saveManagerPermissions()} disabled={isSavingPermissions}>
+                    {isSavingPermissions ? <LoaderCircle className="animate-spin" /> : null}
+                    {isSavingPermissions ? "Saving..." : "Save Manager permissions"}
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Add an employee</CardTitle>
           <CardDescription>
-            Choose a unique username and role. Passwords are hashed on this device and are never displayed after creation.
+            Create a Manager profile with a unique username. Passwords are hashed on this device and are never displayed after creation.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -190,24 +303,9 @@ export function EmployeesPage() {
                 required
                 value={username}
                 onChange={(event) => setUsername(event.target.value)}
-                placeholder="e.g. jean.cashier"
+                placeholder="e.g. jean.manager"
               />
               <p className="text-xs text-muted-foreground">3–32 letters, numbers, dots, underscores or hyphens.</p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="employee-role">Role</Label>
-              <SelectField
-                id="employee-role"
-                value={role}
-                onChange={(event) => {
-                  const selectedRole = ROLES.find((item) => item.value === event.target.value);
-                  if (selectedRole) {
-                    setRole(selectedRole.value);
-                  }
-                }}
-              >
-                {ROLES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-              </SelectField>
             </div>
             <div className="space-y-2">
               <Label htmlFor="employee-password">Initial password</Label>
@@ -239,7 +337,7 @@ export function EmployeesPage() {
             <div className="flex justify-end md:col-span-2">
               <Button type="submit" disabled={isSaving}>
                 {isSaving ? <LoaderCircle className="animate-spin" /> : <Plus />}
-                {isSaving ? "Saving..." : "Create employee"}
+                {isSaving ? "Saving..." : "Create Manager profile"}
               </Button>
             </div>
           </form>
