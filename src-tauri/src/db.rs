@@ -1397,6 +1397,245 @@ pub fn create_expense(
     .map_err(DbError::Sqlite)
 }
 
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct DailyAmountBreakdown {
+    pub category: String,
+    pub amount: i64,
+}
+
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct DailyCountBreakdown {
+    pub movement_type: String,
+    pub count: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct DailyBusinessReport {
+    pub business_name: String,
+    pub report_date: String,
+    pub sale_count: i64,
+    pub sales_total: i64,
+    pub sales_by_payment_method: Vec<DailyAmountBreakdown>,
+    pub credit_sales: i64,
+    pub customer_repayments: i64,
+    pub expenses_total: i64,
+    pub expenses_by_category: Vec<DailyAmountBreakdown>,
+    pub supplier_payments: i64,
+    pub purchases_received: i64,
+    pub cost_of_goods_sold: i64,
+    pub gross_profit: i64,
+    pub operating_result: i64,
+    pub sale_line_count: i64,
+    pub customer_outstanding: i64,
+    pub supplier_outstanding: i64,
+    pub stock_adjustment_counts: Vec<DailyCountBreakdown>,
+}
+
+fn report_amount(
+    conn: &Connection,
+    sql: &str,
+    business_id: &str,
+    report_date: &str,
+) -> Result<i64, DbError> {
+    Ok(conn.query_row(sql, params![business_id, report_date], |row| row.get(0))?)
+}
+
+fn report_business_amount(conn: &Connection, sql: &str, business_id: &str) -> Result<i64, DbError> {
+    Ok(conn.query_row(sql, params![business_id], |row| row.get(0))?)
+}
+
+pub fn daily_business_report(
+    conn: &Connection,
+    business_id: &str,
+    report_date: &str,
+) -> Result<DailyBusinessReport, DbError> {
+    validate_expense_date(report_date)?;
+    let business_name: Option<String> = conn
+        .query_row(
+            "SELECT name FROM businesses WHERE id = ?1",
+            params![business_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let business_name = business_name
+        .ok_or_else(|| DbError::InvalidInput("business does not exist".to_string()))?;
+
+    let sale_count = report_amount(
+        conn,
+        "SELECT COUNT(*) FROM sales
+         WHERE business_id = ?1 AND status = 'completed' AND date(created_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
+    let sales_total = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(total), 0) FROM sales
+         WHERE business_id = ?1 AND status = 'completed' AND date(created_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
+    let mut payment_stmt = conn.prepare(
+        "SELECT sp.payment_method, SUM(sp.amount)
+         FROM sale_payments sp
+         JOIN sales s ON s.id = sp.sale_id AND s.business_id = ?1
+         WHERE s.status = 'completed' AND date(sp.created_at, 'localtime') = ?2
+         GROUP BY sp.payment_method ORDER BY sp.payment_method",
+    )?;
+    let sales_by_payment_method = payment_stmt
+        .query_map(params![business_id, report_date], |row| {
+            Ok(DailyAmountBreakdown {
+                category: row.get(0)?,
+                amount: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let credit_sales = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(
+            d.original_amount - COALESCE((
+                SELECT SUM(sp.amount) FROM sale_payments sp
+                WHERE sp.sale_id = d.sale_id
+            ), 0)
+         ), 0)
+         FROM customer_debts d
+         JOIN sales s ON s.id = d.sale_id AND s.business_id = d.business_id
+         WHERE d.business_id = ?1 AND s.status = 'completed'
+           AND date(s.created_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
+    let customer_repayments = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(amount), 0) FROM customer_debt_payments
+         WHERE business_id = ?1 AND date(created_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
+    let expenses_total = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(amount), 0) FROM expenses
+         WHERE business_id = ?1 AND expense_date = ?2",
+        business_id,
+        report_date,
+    )?;
+    let mut expense_stmt = conn.prepare(
+        "SELECT category, SUM(amount) FROM expenses
+         WHERE business_id = ?1 AND expense_date = ?2
+         GROUP BY category ORDER BY category",
+    )?;
+    let expenses_by_category = expense_stmt
+        .query_map(params![business_id, report_date], |row| {
+            Ok(DailyAmountBreakdown {
+                category: row.get(0)?,
+                amount: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let supplier_payments = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(amount), 0) FROM purchase_payments
+         WHERE business_id = ?1 AND date(created_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
+    let purchases_received = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(pri.total_cost), 0)
+         FROM purchase_receipt_items pri
+         JOIN purchase_receipts pr
+           ON pr.id = pri.receipt_id AND pr.business_id = pri.business_id
+         WHERE pr.business_id = ?1 AND date(pr.created_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
+    let cost_of_goods_sold = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(si.total_cost), 0)
+         FROM sale_items si
+         JOIN sales s ON s.id = si.sale_id AND s.business_id = si.business_id
+         WHERE s.business_id = ?1 AND s.status = 'completed'
+           AND date(s.created_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
+    let gross_profit = sales_total.checked_sub(cost_of_goods_sold).ok_or_else(|| {
+        DbError::InvalidInput("gross profit exceeds the supported range".to_string())
+    })?;
+    let operating_result = gross_profit.checked_sub(expenses_total).ok_or_else(|| {
+        DbError::InvalidInput("operating result exceeds the supported range".to_string())
+    })?;
+    let sale_line_count = report_amount(
+        conn,
+        "SELECT COUNT(*) FROM sale_items si
+         JOIN sales s ON s.id = si.sale_id AND s.business_id = si.business_id
+         WHERE s.business_id = ?1 AND s.status = 'completed'
+           AND date(s.created_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
+    let customer_outstanding = report_business_amount(
+        conn,
+        "SELECT COALESCE(SUM(
+            d.original_amount
+            - COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp
+                        WHERE sp.sale_id = d.sale_id), 0)
+            - COALESCE((SELECT SUM(dp.amount) FROM customer_debt_payments dp
+                        WHERE dp.business_id = d.business_id AND dp.debt_id = d.id), 0)
+         ), 0)
+         FROM customer_debts d WHERE d.business_id = ?1",
+        business_id,
+    )?;
+    let supplier_outstanding = report_business_amount(
+        conn,
+        "SELECT COALESCE(SUM(
+            p.subtotal - COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp
+                                   WHERE pp.business_id = p.business_id
+                                     AND pp.purchase_id = p.id), 0)
+         ), 0)
+         FROM purchases p WHERE p.business_id = ?1",
+        business_id,
+    )?;
+    let mut adjustment_stmt = conn.prepare(
+        "SELECT movement_type, COUNT(*)
+         FROM stock_movements
+        WHERE business_id = ?1 AND date(created_at, 'localtime') = ?2
+           AND movement_type IN (
+             'customer_return', 'supplier_return', 'damaged_stock',
+             'stock_correction', 'stock_transfer', 'manual_adjustment'
+           )
+         GROUP BY movement_type ORDER BY movement_type",
+    )?;
+    let stock_adjustment_counts = adjustment_stmt
+        .query_map(params![business_id, report_date], |row| {
+            Ok(DailyCountBreakdown {
+                movement_type: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(DailyBusinessReport {
+        business_name,
+        report_date: report_date.to_string(),
+        sale_count,
+        sales_total,
+        sales_by_payment_method,
+        credit_sales,
+        customer_repayments,
+        expenses_total,
+        expenses_by_category,
+        supplier_payments,
+        purchases_received,
+        cost_of_goods_sold,
+        gross_profit,
+        operating_result,
+        sale_line_count,
+        customer_outstanding,
+        supplier_outstanding,
+        stock_adjustment_counts,
+    })
+}
+
 pub fn list_customer_debts(
     conn: &Connection,
     business_id: &str,
@@ -5334,6 +5573,119 @@ mod tests {
                 expense.id
             )
         );
+    }
+
+    #[test]
+    fn daily_business_report_reconciles_sales_credit_costs_expenses_and_balances() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let customer = create_customer(
+            &conn,
+            &business.id,
+            "Aline Mukamana",
+            None,
+            None,
+            "individual",
+            20_000,
+        )
+        .unwrap();
+        let product = create_test_product(&conn, &business.id, "REPORT-DAILY-01");
+        set_opening_stock(&conn, &business.id, &product.id, 2_000, None).unwrap();
+        update_base_selling_price(&conn, &business.id, &product.id, 15_000).unwrap();
+
+        let sale = checkout_sale_with_payments(
+            &conn,
+            &business.id,
+            &[SaleItemInput {
+                product_id: product.id,
+                quantity: 1_000,
+                selling_price: None,
+                price_change_reason: None,
+            }],
+            Some(&customer.id),
+            &[SalePaymentInput {
+                payment_method: "cash".to_string(),
+                amount: 5_000,
+            }],
+        )
+        .unwrap();
+        let report_date = chrono::DateTime::parse_from_rfc3339(&sale.created_at)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let debt = list_customer_debts(&conn, &business.id).unwrap().remove(0);
+        record_customer_debt_payment(&conn, &business.id, &debt.id, "mtn_mobile_money", 6_000)
+            .unwrap();
+        create_expense(
+            &conn,
+            &business.id,
+            "electricity",
+            500,
+            &report_date,
+            "cash",
+            "Daily report test expense",
+            "Manager",
+        )
+        .unwrap();
+        create_expense(
+            &conn,
+            &other_business.id,
+            "rent",
+            900,
+            &report_date,
+            "cash",
+            "Other business expense",
+            "Manager",
+        )
+        .unwrap();
+
+        let report = daily_business_report(&conn, &business.id, &report_date).unwrap();
+
+        assert_eq!(report.business_name, "Hardware shop");
+        assert_eq!(report.report_date, report_date);
+        assert_eq!(report.sale_count, 1);
+        assert_eq!(report.sales_total, 15_000);
+        assert_eq!(
+            report.sales_by_payment_method,
+            vec![DailyAmountBreakdown {
+                category: "cash".to_string(),
+                amount: 5_000,
+            }]
+        );
+        assert_eq!(report.credit_sales, 10_000);
+        assert_eq!(report.customer_repayments, 6_000);
+        assert_eq!(report.expenses_total, 500);
+        assert_eq!(
+            report.expenses_by_category,
+            vec![DailyAmountBreakdown {
+                category: "electricity".to_string(),
+                amount: 500,
+            }]
+        );
+        assert_eq!(report.cost_of_goods_sold, 10_000);
+        assert_eq!(report.gross_profit, 5_000);
+        assert_eq!(report.operating_result, 4_500);
+        assert_eq!(report.sale_line_count, 1);
+        assert_eq!(report.customer_outstanding, 4_000);
+        assert_eq!(report.supplier_outstanding, 0);
+        assert!(report.stock_adjustment_counts.is_empty());
+    }
+
+    #[test]
+    fn daily_business_report_rejects_invalid_date_and_unknown_business() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+
+        assert!(matches!(
+            daily_business_report(&conn, &business.id, "2026-02-30"),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            daily_business_report(&conn, "missing-business", "2026-02-28"),
+            Err(DbError::InvalidInput(_))
+        ));
     }
 
     #[test]

@@ -11,6 +11,7 @@ import { SuppliersPage } from "@/modules/suppliers/suppliers-page";
 import { CustomersPage } from "@/modules/customers/customers-page";
 import { PaymentsPage } from "@/modules/payments/payments-page";
 import { ExpensesPage } from "@/modules/expenses/expenses-page";
+import { ReportsPage } from "@/modules/reports/reports-page";
 
 const placeholder = (title: string, description: string) => (
   <PagePlaceholder title={title} description={description} />
@@ -31,7 +32,7 @@ export const router = createBrowserRouter([
       { path: "suppliers", element: <SuppliersPage /> },
       { path: "expenses", element: <ExpensesPage /> },
       { path: "payments", element: <PaymentsPage /> },
-      { path: "reports", element: placeholder("Reports", "Daily, weekly and monthly business reports.") },
+      { path: "reports", element: <ReportsPage /> },
       { path: "employees", element: placeholder("Employees", "Users, roles and permissions.") },
       { path: "settings", element: <BusinessSetupPage /> },
     ],

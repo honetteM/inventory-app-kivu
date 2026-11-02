@@ -392,6 +392,17 @@ fn expense_list(
 }
 
 #[tauri::command]
+fn daily_business_report(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    report_date: String,
+) -> Result<db::DailyBusinessReport, String> {
+    state
+        .with(|conn| db::daily_business_report(conn, &business_id, &report_date))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn expense_create(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -644,6 +655,7 @@ pub fn run() {
             customer_debt_list,
             customer_statement,
             expense_list,
+            daily_business_report,
             expense_create,
             customer_debt_record_payment,
             purchase_product_list,

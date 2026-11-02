@@ -597,6 +597,12 @@ Purchases, sales, expenses and repayments must not be mixed into one simple cash
 
 Allow reports to be regenerated after authorized corrections, while preserving the original audit history.
 
+### Current implementation status
+
+The first reporting slice is a manually selected, business-scoped daily summary. It includes completed sales and payment methods, unpaid credit sales, customer repayments, recorded expenses, supplier payments, received purchases, FIFO cost of goods sold, gross profit, operating result, current customer and supplier balances, and stock-adjustment event counts.
+
+Automatic scheduling and PDF export, branch data, opening/closing cash reconciliation, cash discrepancies, and worker performance remain pending. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
+
 ---
 
 # 14. USERS AND PERMISSIONS
