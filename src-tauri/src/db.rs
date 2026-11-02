@@ -96,6 +96,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "020_opening_balances_and_cash_posting",
         include_str!("../migrations/020_opening_balances_and_cash_posting.sql"),
     ),
+    (
+        21,
+        "021_account_backed_expenses",
+        include_str!("../migrations/021_account_backed_expenses.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -134,8 +139,6 @@ pub const PERMISSION_PURCHASES_READ: &str = "purchases.read";
 pub const PERMISSION_PURCHASES_MANAGE: &str = "purchases.manage";
 pub const PERMISSION_EXPENSES_READ: &str = "expenses.read";
 pub const PERMISSION_EXPENSES_MANAGE: &str = "expenses.manage";
-// Reserved until verified account balances are available to payment flows.
-#[allow(dead_code)]
 pub const PERMISSION_CASH_ACCOUNT_BALANCE_READ: &str = "cash_accounts.balance.read";
 pub const PERMISSION_REPORTS_READ: &str = "reports.read";
 pub const PERMISSION_ROLES_MANAGE: &str = "roles.manage";
@@ -159,6 +162,8 @@ const MANAGER_PERMISSION_IDS: &[&str] = &[
     PERMISSION_SALES_MANAGE,
     PERMISSION_PURCHASES_READ,
     PERMISSION_PURCHASES_MANAGE,
+    PERMISSION_EXPENSES_READ,
+    PERMISSION_EXPENSES_MANAGE,
 ];
 
 const DEFAULT_MANAGER_PERMISSION_IDS: &[&str] = &[
@@ -180,6 +185,8 @@ const DEFAULT_MANAGER_PERMISSION_IDS: &[&str] = &[
     PERMISSION_SALES_MANAGE,
     PERMISSION_PURCHASES_READ,
     PERMISSION_PURCHASES_MANAGE,
+    PERMISSION_EXPENSES_READ,
+    PERMISSION_EXPENSES_MANAGE,
 ];
 
 /// Application state holding the single SQLite connection.
@@ -2907,6 +2914,7 @@ pub struct Expense {
     pub amount: i64,
     pub expense_date: String,
     pub payment_method: String,
+    pub cash_account_id: Option<String>,
     pub description: String,
     pub responsible_name: String,
     pub created_at: String,
@@ -2956,9 +2964,10 @@ fn map_expense(row: &rusqlite::Row<'_>) -> rusqlite::Result<Expense> {
         amount: row.get(3)?,
         expense_date: row.get(4)?,
         payment_method: row.get(5)?,
-        description: row.get(6)?,
-        responsible_name: row.get(7)?,
-        created_at: row.get(8)?,
+        cash_account_id: row.get(6)?,
+        description: row.get(7)?,
+        responsible_name: row.get(8)?,
+        created_at: row.get(9)?,
     })
 }
 
@@ -2981,7 +2990,7 @@ pub fn list_expenses(
     )?;
     let mut stmt = conn.prepare(
         "SELECT id, business_id, category, amount, expense_date, payment_method,
-                description, responsible_name, created_at
+                cash_account_id, description, responsible_name, created_at
          FROM expenses WHERE business_id = ?1
          ORDER BY expense_date DESC, created_at DESC, id
          LIMIT ?2 OFFSET ?3",
@@ -2992,7 +3001,7 @@ pub fn list_expenses(
     Ok(ExpensePage { items, total_count })
 }
 
-pub fn create_expense(
+pub fn create_expense_as_user(
     conn: &Connection,
     business_id: &str,
     category: &str,
@@ -3001,7 +3010,15 @@ pub fn create_expense(
     payment_method: &str,
     description: &str,
     responsible_name: &str,
+    account_id: &str,
+    actor: &AuthUser,
 ) -> Result<Expense, DbError> {
+    if actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "you are not signed in to this business".to_string(),
+        ));
+    }
+    require_permission(conn, actor, PERMISSION_EXPENSES_MANAGE)?;
     validate_expense_category(category)?;
     validate_expense_date(expense_date)?;
     if !valid_sale_payment_method(payment_method) {
@@ -3026,23 +3043,20 @@ pub fn create_expense(
             "responsible person must contain 1 to 160 characters".to_string(),
         ));
     }
-    let business_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM businesses WHERE id = ?1)",
-        params![business_id],
-        |row| row.get(0),
-    )?;
-    if !business_exists {
-        return Err(DbError::InvalidInput("business does not exist".to_string()));
-    }
-
     let id = uuid::Uuid::new_v4().to_string();
     let timestamp = now_utc();
     let tx = conn.unchecked_transaction()?;
+    let available_balance = validate_payment_account(&tx, business_id, account_id, payment_method)?;
+    if amount > available_balance {
+        return Err(DbError::InvalidInput(format!(
+            "expense exceeds the available balance of {available_balance} in the selected account"
+        )));
+    }
     tx.execute(
         "INSERT INTO expenses
             (id, business_id, category, amount, expense_date, payment_method,
-             description, responsible_name, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             description, responsible_name, created_at, cash_account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             id,
             business_id,
@@ -3052,23 +3066,38 @@ pub fn create_expense(
             payment_method,
             description,
             responsible_name,
-            timestamp
+            timestamp,
+            account_id
         ],
+    )?;
+    insert_cash_movement(
+        &tx,
+        business_id,
+        account_id,
+        "expense_payment",
+        "out",
+        amount,
+        "expense_payment",
+        &id,
+        &actor.id,
+        &timestamp,
     )?;
     tx.execute(
         "INSERT INTO audit_logs
-            (id, business_id, action, entity_type, entity_id, details, created_at)
-         VALUES (?1, ?2, 'expense_created', 'expense', ?3, ?4, ?5)",
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'expense_created', 'expense', ?4, ?5, ?6)",
         params![
             uuid::Uuid::new_v4().to_string(),
             business_id,
+            actor.id,
             id,
             serde_json::json!({
                 "category": category,
                 "amount": amount,
                 "expense_date": expense_date,
                 "payment_method": payment_method,
-                "responsible_name": responsible_name
+                "responsible_name": responsible_name,
+                "cash_account_id": account_id
             })
             .to_string(),
             timestamp
@@ -3078,12 +3107,38 @@ pub fn create_expense(
 
     conn.query_row(
         "SELECT id, business_id, category, amount, expense_date, payment_method,
-                description, responsible_name, created_at
+                cash_account_id, description, responsible_name, created_at
          FROM expenses WHERE id = ?1 AND business_id = ?2",
         params![id, business_id],
         map_expense,
     )
     .map_err(DbError::Sqlite)
+}
+
+#[cfg(test)]
+pub fn create_expense(
+    conn: &Connection,
+    business_id: &str,
+    category: &str,
+    amount: i64,
+    expense_date: &str,
+    payment_method: &str,
+    description: &str,
+    responsible_name: &str,
+) -> Result<Expense, DbError> {
+    let (account_id, actor) = test_payment_account(conn, business_id, payment_method)?;
+    create_expense_as_user(
+        conn,
+        business_id,
+        category,
+        amount,
+        expense_date,
+        payment_method,
+        description,
+        responsible_name,
+        &account_id,
+        &actor,
+    )
 }
 
 #[derive(Debug, PartialEq, serde::Serialize)]
@@ -6575,22 +6630,23 @@ mod tests {
             require_permission(&conn, &manager, PERMISSION_CASH_ACCOUNTS_MANAGE),
             Err(DbError::InvalidInput(_))
         ));
-        assert!(matches!(
-            require_permission(&conn, &manager, PERMISSION_EXPENSES_READ),
-            Err(DbError::InvalidInput(_))
-        ));
-        assert!(matches!(
-            require_permission(&conn, &manager, PERMISSION_EXPENSES_MANAGE),
-            Err(DbError::InvalidInput(_))
-        ));
+        require_permission(&conn, &manager, PERMISSION_EXPENSES_READ).unwrap();
+        require_permission(&conn, &manager, PERMISSION_EXPENSES_MANAGE).unwrap();
         require_permission(&conn, &manager, PERMISSION_CASH_ACCOUNT_BALANCE_READ).unwrap();
         assert!(
             list_manager_permissions(&conn, &business.id)
                 .unwrap()
                 .iter()
-                .all(|setting| {
-                    setting.permission_id != PERMISSION_EXPENSES_READ
-                        && setting.permission_id != PERMISSION_EXPENSES_MANAGE
+                .any(|setting| {
+                    setting.permission_id == PERMISSION_EXPENSES_READ && setting.enabled
+                })
+        );
+        assert!(
+            list_manager_permissions(&conn, &business.id)
+                .unwrap()
+                .iter()
+                .any(|setting| {
+                    setting.permission_id == PERMISSION_EXPENSES_MANAGE && setting.enabled
                 })
         );
         assert!(
@@ -7054,8 +7110,8 @@ mod tests {
         assert!(permissions.contains(&PERMISSION_CUSTOMER_PAYMENTS_MANAGE.to_string()));
         assert!(!permissions.contains(&PERMISSION_REPORTS_READ.to_string()));
         assert!(!permissions.contains(&"finance.read".to_string()));
-        assert!(!permissions.contains(&PERMISSION_EXPENSES_READ.to_string()));
-        assert!(!permissions.contains(&PERMISSION_EXPENSES_MANAGE.to_string()));
+        assert!(permissions.contains(&PERMISSION_EXPENSES_READ.to_string()));
+        assert!(permissions.contains(&PERMISSION_EXPENSES_MANAGE.to_string()));
         assert!(permissions.contains(&PERMISSION_CASH_ACCOUNT_BALANCE_READ.to_string()));
         state
             .with_authorized(PERMISSION_CATALOG_MANAGE, |_, _| Ok(()))
@@ -7091,15 +7147,13 @@ mod tests {
         }
 
         let business = create_business(&conn, "Hardware shop", None).unwrap();
-        create_expense(
-            &conn,
-            &business.id,
-            "rent",
-            250_000,
-            "2026-11-02",
-            "cash",
-            "Existing rent expense",
-            "Manager",
+        conn.execute(
+            "INSERT INTO expenses
+                (id, business_id, category, amount, expense_date, payment_method,
+                 description, responsible_name, created_at)
+             VALUES (?1, ?2, 'rent', 250000, '2026-11-02', 'cash',
+                     'Existing rent expense', 'Manager', ?3)",
+            params![uuid::Uuid::new_v4().to_string(), business.id, now_utc()],
         )
         .unwrap();
 
@@ -8559,8 +8613,28 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let business = create_business(&conn, "Hardware shop", None).unwrap();
         let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let (_, owner) = test_payment_account(&conn, &business.id, "mtn_mobile_money").unwrap();
+        let employee = create_employee(
+            &conn,
+            &business.id,
+            &owner,
+            "manager.one",
+            "Manager One",
+            "manager",
+            "$argon2id$manager-hash",
+        )
+        .unwrap();
+        let manager = AuthUser {
+            id: employee.id,
+            business_id: employee.business_id,
+            username: employee.username,
+            full_name: employee.full_name,
+            role: employee.role,
+        };
+        let (account_id, _) =
+            test_payment_account(&conn, &business.id, "mtn_mobile_money").unwrap();
 
-        let expense = create_expense(
+        let expense = create_expense_as_user(
             &conn,
             &business.id,
             "electricity",
@@ -8569,6 +8643,8 @@ mod tests {
             "mtn_mobile_money",
             "  Monthly electricity bill  ",
             "  Aline Uwase  ",
+            &account_id,
+            &manager,
         )
         .unwrap();
         create_expense(
@@ -8597,11 +8673,12 @@ mod tests {
                 .total_count,
             1
         );
-        let audit_record: (String, String, String) = conn
+        let audit_record: (String, String, String, String) = conn
             .query_row(
-                "SELECT action, entity_type, entity_id FROM audit_logs WHERE entity_id = ?1",
+                "SELECT action, entity_type, entity_id, user_id
+                 FROM audit_logs WHERE entity_id = ?1",
                 params![expense.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
         assert_eq!(
@@ -8609,8 +8686,80 @@ mod tests {
             (
                 "expense_created".to_string(),
                 "expense".to_string(),
-                expense.id
+                expense.id,
+                manager.id.clone()
             )
+        );
+        assert_eq!(
+            cash_account_balance(&conn, &business.id, &account_id).unwrap(),
+            1_000_000_000 - 125_050
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cash_movements
+                 WHERE business_id = ?1 AND source_type = 'expense_payment'
+                   AND responsible_user_id = ?2",
+                params![business.id, manager.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn expense_recording_rejects_unopened_mismatched_and_insufficient_accounts() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let (_, owner) = test_payment_account(&conn, &business.id, "cash").unwrap();
+        let (cash_account_id, _) = test_payment_account(&conn, &business.id, "cash").unwrap();
+        let (bank_account_id, _) =
+            test_payment_account(&conn, &business.id, "bank_transfer").unwrap();
+
+        assert!(
+            create_expense_as_user(
+                &conn,
+                &business.id,
+                "rent",
+                100,
+                "2026-11-02",
+                "cash",
+                "Rent",
+                "Manager",
+                &bank_account_id,
+                &owner,
+            )
+            .is_err()
+        );
+        assert!(
+            create_expense_as_user(
+                &conn,
+                &business.id,
+                "rent",
+                1_000_000_001,
+                "2026-11-02",
+                "cash",
+                "Rent",
+                "Manager",
+                &cash_account_id,
+                &owner,
+            )
+            .is_err()
+        );
+        let (expense_count, movement_count): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM expenses WHERE business_id = ?1),
+                        (SELECT COUNT(*) FROM cash_movements
+                         WHERE business_id = ?1 AND source_type = 'expense_payment')",
+                params![business.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(expense_count, 0);
+        assert_eq!(movement_count, 0);
+        assert_eq!(
+            cash_account_balance(&conn, &business.id, &cash_account_id).unwrap(),
+            1_000_000_000
         );
     }
 
@@ -8785,7 +8934,11 @@ mod tests {
                 .is_empty()
         );
         let audit_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM audit_logs", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM audit_logs WHERE action = 'expense_created'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(audit_count, 0);
     }

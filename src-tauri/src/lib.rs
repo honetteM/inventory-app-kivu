@@ -811,20 +811,27 @@ fn expense_create(
     payment_method: String,
     description: String,
     responsible_name: String,
+    account_id: String,
 ) -> Result<db::Expense, String> {
     state
-        .with_business_permission(&business_id, db::PERMISSION_EXPENSES_MANAGE, |conn, _| {
-            db::create_expense(
-                conn,
-                &business_id,
-                &category,
-                amount,
-                &expense_date,
-                &payment_method,
-                &description,
-                &responsible_name,
-            )
-        })
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_EXPENSES_MANAGE,
+            |conn, user| {
+                db::create_expense_as_user(
+                    conn,
+                    &business_id,
+                    &category,
+                    amount,
+                    &expense_date,
+                    &payment_method,
+                    &description,
+                    &responsible_name,
+                    &account_id,
+                    user,
+                )
+            },
+        )
         .map_err(|e| e.to_string())
 }
 

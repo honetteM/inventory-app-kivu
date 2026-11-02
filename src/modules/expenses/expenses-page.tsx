@@ -9,6 +9,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/shared/page-header";
 import { SelectField } from "@/components/shared/select-field";
+import {
+  accountsForPaymentMethod,
+  loadCashAccountPaymentOptions,
+  type CashAccountPaymentOption,
+  type PaymentMethod,
+} from "@/modules/cash-accounts/cash-account-payment-options";
+import { useAuthentication } from "@/modules/auth/auth-gate";
 
 const PAGE_SIZE = 20;
 const MONEY_SCALE = 100n;
@@ -23,8 +30,6 @@ type ExpenseCategory =
   | "repairs"
   | "security"
   | "other";
-
-type PaymentMethod = "cash" | "mtn_mobile_money" | "airtel_money" | "bank_transfer";
 
 const CATEGORIES: { value: ExpenseCategory; label: string }[] = [
   { value: "rent", label: "Rent" },
@@ -73,6 +78,7 @@ interface ExpenseForm {
   paymentMethod: PaymentMethod;
   description: string;
   responsibleName: string;
+  accountId: string;
 }
 
 function localDate(): string {
@@ -81,14 +87,15 @@ function localDate(): string {
   return new Date(date.getTime() - offset).toISOString().slice(0, 10);
 }
 
-function emptyForm(): ExpenseForm {
+function emptyForm(responsibleName: string): ExpenseForm {
   return {
     category: "other",
     amount: "",
     expenseDate: localDate(),
     paymentMethod: "cash",
     description: "",
-    responsibleName: "",
+    responsibleName,
+    accountId: "",
   };
 }
 
@@ -127,13 +134,15 @@ function paymentMethodLabel(method: PaymentMethod): string {
 }
 
 export function ExpensesPage() {
+  const { user } = useAuthentication();
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessId, setBusinessId] = useState("");
+  const [cashAccounts, setCashAccounts] = useState<CashAccountPaymentOption[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [page, setPage] = useState(0);
   const [refreshToken, setRefreshToken] = useState(0);
-  const [form, setForm] = useState<ExpenseForm>(emptyForm);
+  const [form, setForm] = useState<ExpenseForm>(() => emptyForm(user.full_name));
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
   const [isLoadingExpenses, setIsLoadingExpenses] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -205,10 +214,42 @@ export function ExpensesPage() {
     };
   }, [businessId, page, refreshToken]);
 
+  useEffect(() => {
+    if (!businessId) {
+      setCashAccounts([]);
+      setForm((current) => ({ ...current, accountId: "" }));
+      return;
+    }
+
+    let active = true;
+    loadCashAccountPaymentOptions(businessId)
+      .then((result) => {
+        if (active) {
+          setCashAccounts(result);
+          setForm((current) => {
+            const options = accountsForPaymentMethod(result, current.paymentMethod);
+            return options.some((account) => account.id === current.accountId)
+              ? current
+              : { ...current, accountId: options[0]?.id ?? "" };
+          });
+        }
+      })
+      .catch((cause: unknown) => {
+        if (active) {
+          setCashAccounts([]);
+          setError(`Could not load opened payment accounts. ${errorText(cause)}`);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [businessId]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const amount = parseMoney(form.amount);
-    if (!businessId || amount === null) {
+    if (!businessId || amount === null || !form.accountId) {
       setError("Enter an expense amount greater than zero with no more than 2 decimal places.");
       return;
     }
@@ -229,8 +270,20 @@ export function ExpensesPage() {
         paymentMethod: form.paymentMethod,
         description: form.description.trim(),
         responsibleName: form.responsibleName.trim(),
+        accountId: form.accountId,
       });
-      setForm(emptyForm());
+      setForm(emptyForm(user.full_name));
+      try {
+        const accounts = await loadCashAccountPaymentOptions(businessId);
+        setCashAccounts(accounts);
+        setForm((current) => ({
+          ...current,
+          accountId:
+            accountsForPaymentMethod(accounts, current.paymentMethod)[0]?.id ?? "",
+        }));
+      } catch (cause) {
+        setError(`Expense was recorded, but account balances could not be refreshed. ${errorText(cause)}`);
+      }
       setPage(0);
       setTotalCount((current) => current + 1);
       setRefreshToken((current) => current + 1);
@@ -367,7 +420,12 @@ export function ExpensesPage() {
                       onChange={(event) => {
                         const selected = PAYMENT_METHODS.find((method) => method.value === event.target.value);
                         if (selected) {
-                          setForm((current) => ({ ...current, paymentMethod: selected.value }));
+                          const accounts = accountsForPaymentMethod(cashAccounts, selected.value);
+                          setForm((current) => ({
+                            ...current,
+                            paymentMethod: selected.value,
+                            accountId: accounts[0]?.id ?? "",
+                          }));
                         }
                       }}
                     >
@@ -376,6 +434,27 @@ export function ExpensesPage() {
                       ))}
                     </SelectField>
                   </div>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="expense-account">Pay from account</Label>
+                  <SelectField
+                    id="expense-account"
+                    required
+                    value={form.accountId}
+                    onChange={(event) => setForm((current) => ({ ...current, accountId: event.target.value }))}
+                  >
+                    <option value="">Select an opened account</option>
+                    {accountsForPaymentMethod(cashAccounts, form.paymentMethod).map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.name} · Available {formatMoney(account.availableBalance)}
+                      </option>
+                    ))}
+                  </SelectField>
+                  {accountsForPaymentMethod(cashAccounts, form.paymentMethod).length === 0 ? (
+                    <p className="text-xs text-amber-700">
+                      No opened account matches this payment method. Ask the Owner/Admin to set up the account and authorize its opening balance.
+                    </p>
+                  ) : null}
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="expense-description">Description</Label>
@@ -398,11 +477,8 @@ export function ExpensesPage() {
                     onChange={(event) => setForm((current) => ({ ...current, responsibleName: event.target.value }))}
                     placeholder="Name of the person recording this expense"
                   />
-                  <p className="text-xs leading-5 text-muted-foreground">
-                    Staff accounts are not connected to the expense workflow yet.
-                  </p>
                 </div>
-                <Button type="submit" disabled={isSaving || !form.amount.trim() || !form.description.trim() || !form.responsibleName.trim()}>
+                <Button type="submit" disabled={isSaving || !form.amount.trim() || !form.description.trim() || !form.responsibleName.trim() || !form.accountId}>
                   {isSaving ? <LoaderCircle className="animate-spin" /> : <Wallet />}
                   {isSaving ? "Recording..." : "Record expense"}
                 </Button>

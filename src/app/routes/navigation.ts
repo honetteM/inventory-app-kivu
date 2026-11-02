@@ -45,7 +45,7 @@ export const navGroups: NavGroup[] = [
       { title: "Sales History", url: "/sales", icon: ReceiptText, permission: "sales.read" },
       { title: "Customers", url: "/customers", icon: Users, permission: "customers.read" },
       { title: "Suppliers", url: "/suppliers", icon: Factory, permission: "suppliers.read" },
-      { title: "Expenses", url: "/expenses", icon: Wallet, permission: "finance.read" },
+      { title: "Expenses", url: "/expenses", icon: Wallet, permission: "expenses.read" },
       { title: "Payments", url: "/payments", icon: HandCoins, permission: "customer_debts.read" },
       { title: "Cash accounts", url: "/cash-accounts", icon: Landmark, permission: "cash_accounts.manage" },
       { title: "Reports", url: "/reports", icon: BarChart3, permission: "reports.read" },

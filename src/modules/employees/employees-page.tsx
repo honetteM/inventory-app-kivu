@@ -47,6 +47,8 @@ const PERMISSION_LABELS: Record<string, string> = {
   "sales.manage": "Record sales",
   "purchases.read": "View purchases and purchase costs",
   "purchases.manage": "Create purchases, receive deliveries and record supplier payments",
+  "expenses.read": "View operating expense records",
+  "expenses.manage": "Record operating expenses from verified account balances",
 };
 
 function errorText(cause: unknown): string {
@@ -223,7 +225,7 @@ export function EmployeesPage() {
             <div>
               <p className="font-medium">Manager permissions</p>
               <p className="mt-1 text-sm text-muted-foreground">
-                Managers can handle products, stock, purchases, sales, customers and suppliers, and can view opened account balances when choosing a payment source. Financial reports, expenses, cash-account administration and employee access remain Owner/Admin-only. Managers can view purchase costs.
+                Managers can handle products, stock, purchases, sales, customers, suppliers and operating expenses. Expenses require an opened payment account with enough verified funds. Financial reports, cash-account administration and employee access remain Owner/Admin-only. Managers can view purchase costs.
               </p>
             </div>
             {isLoadingPermissions ? (
