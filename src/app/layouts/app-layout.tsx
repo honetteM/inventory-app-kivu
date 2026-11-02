@@ -4,18 +4,22 @@ import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/s
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { AppSidebar } from "./app-sidebar";
-import { navGroups } from "@/app/routes/navigation";
+import { getAvailableNavGroups, navGroups } from "@/app/routes/navigation";
 import { useAuthentication } from "@/modules/auth/auth-gate";
 
 export function AppLayout() {
-  const { user, logout, error } = useAuthentication();
+  const { user, permissions, logout, error } = useAuthentication();
   const { pathname } = useLocation();
   const mainRef = useRef<HTMLElement>(null);
-  const currentGroup = navGroups.find((group) =>
+  const currentRoute = navGroups.flatMap((group) => group.items).find(
+    (item) => pathname === item.url || (item.url !== "/" && pathname.startsWith(`${item.url}/`)),
+  );
+  const currentGroup = getAvailableNavGroups(permissions).find((group) =>
     group.items.some(
       (item) => pathname === item.url || (item.url !== "/" && pathname.startsWith(`${item.url}/`)),
     ),
   );
+  const routeIsRestricted = currentRoute && !permissions.includes(currentRoute.permission);
 
   useEffect(() => {
     mainRef.current?.scrollTo({ top: 0 });
@@ -52,7 +56,16 @@ export function AppLayout() {
         ) : null}
         <main ref={mainRef} className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
           <div className="page-content">
-          <Outlet />
+            {routeIsRestricted ? (
+              <div role="status" className="mx-auto max-w-2xl rounded-lg border bg-card p-6 text-sm">
+                <h1 className="font-semibold">Access restricted</h1>
+                <p className="mt-2 text-muted-foreground">
+                  Your account does not have permission to view this page. Contact the Owner/Admin if you need access.
+                </p>
+              </div>
+            ) : (
+              <Outlet />
+            )}
           </div>
         </main>
       </SidebarInset>

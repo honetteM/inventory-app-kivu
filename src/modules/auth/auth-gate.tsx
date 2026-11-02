@@ -24,6 +24,7 @@ interface AuthUser {
 
 interface AuthContextValue {
   user: AuthUser;
+  permissions: string[];
   logout: () => Promise<void>;
   error: string | null;
 }
@@ -51,6 +52,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [password, setPassword] = useState("");
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [permissions, setPermissions] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,8 +63,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
       try {
         const currentUser = await invoke<AuthUser | null>("auth_current_user");
         if (currentUser) {
+          const currentPermissions = await invoke<string[]>("auth_current_permissions");
           if (active) {
             setUser(currentUser);
+            setPermissions(currentPermissions);
           }
           return;
         }
@@ -120,7 +124,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
             username: username.trim(),
             password,
           });
+      const signedInPermissions = await invoke<string[]>("auth_current_permissions");
       setUser(signedInUser);
+      setPermissions(signedInPermissions);
       setPassword("");
       setPasswordConfirmation("");
     } catch (cause) {
@@ -138,6 +144,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     try {
       await invoke("auth_logout");
       setUser(null);
+      setPermissions([]);
       setPassword("");
       setPasswordConfirmation("");
       setError(null);
@@ -147,8 +154,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
 
   const contextValue = useMemo(
-    () => (user ? { user, logout, error } : null),
-    [user, error],
+    () => (user ? { user, permissions, logout, error } : null),
+    [user, permissions, error],
   );
 
   if (user && contextValue) {

@@ -188,6 +188,13 @@ fn auth_current_user(state: tauri::State<db::DbState>) -> Result<Option<db::Auth
 }
 
 #[tauri::command]
+fn auth_current_permissions(state: tauri::State<db::DbState>) -> Result<Vec<String>, String> {
+    state
+        .with_authenticated(db::list_user_permissions)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn db_info(state: tauri::State<db::DbState>) -> Result<db::DbInfo, String> {
     state
         .with_authorized(db::PERMISSION_SYSTEM_READ, |conn, _| db::info(conn))
@@ -941,6 +948,7 @@ pub fn run() {
             manager_permission_update,
             auth_logout,
             auth_current_user,
+            auth_current_permissions,
             db_info,
             business_list,
             business_create,

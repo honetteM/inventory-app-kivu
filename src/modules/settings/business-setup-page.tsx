@@ -10,6 +10,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { BrandManagementSection } from "./brand-management-section";
 import { CategoryManagementSection } from "./category-management-section";
 import { UnitManagementSection } from "./unit-management-section";
+import { useAuthentication } from "@/modules/auth/auth-gate";
 
 interface Business {
   id: string;
@@ -26,6 +27,7 @@ function errorMessage(error: unknown): string {
 }
 
 export function BusinessSetupPage() {
+  const { user } = useAuthentication();
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [name, setName] = useState("");
   const [taxId, setTaxId] = useState("");
@@ -104,49 +106,51 @@ export function BusinessSetupPage() {
         </div>
       ) : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Business details</CardTitle>
-          <CardDescription>
-            Add the business name and, if applicable, its tax identification number.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form className="grid gap-5 md:grid-cols-2" onSubmit={handleSubmit}>
-            <div className="space-y-2">
-              <Label htmlFor="business-name">Business name</Label>
-              <Input
-                id="business-name"
-                autoComplete="organization"
-                maxLength={120}
-                required
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="e.g. Kigali Hardware"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="business-tax-id">Tax identification number (optional)</Label>
-              <Input
-                id="business-tax-id"
-                maxLength={80}
-                value={taxId}
-                onChange={(event) => setTaxId(event.target.value)}
-                placeholder="TIN"
-              />
-            </div>
-            <div className="flex items-center justify-between gap-4 md:col-span-2">
-              <p className="text-sm text-muted-foreground">
-                Defaults: RWF · Africa/Kigali · DD/MM/YYYY · English
-              </p>
-              <Button type="submit" disabled={isSaving || !name.trim()}>
-                {isSaving ? <LoaderCircle className="animate-spin" /> : <Building2 />}
-                {isSaving ? "Saving..." : "Save business"}
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
+      {user.role === "owner" ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Business details</CardTitle>
+            <CardDescription>
+              Add the business name and, if applicable, its tax identification number.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form className="grid gap-5 md:grid-cols-2" onSubmit={handleSubmit}>
+              <div className="space-y-2">
+                <Label htmlFor="business-name">Business name</Label>
+                <Input
+                  id="business-name"
+                  autoComplete="organization"
+                  maxLength={120}
+                  required
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="e.g. Kigali Hardware"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="business-tax-id">Tax identification number (optional)</Label>
+                <Input
+                  id="business-tax-id"
+                  maxLength={80}
+                  value={taxId}
+                  onChange={(event) => setTaxId(event.target.value)}
+                  placeholder="TIN"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-4 md:col-span-2">
+                <p className="text-sm text-muted-foreground">
+                  Defaults: RWF · Africa/Kigali · DD/MM/YYYY · English
+                </p>
+                <Button type="submit" disabled={isSaving || !name.trim()}>
+                  {isSaving ? <LoaderCircle className="animate-spin" /> : <Building2 />}
+                  {isSaving ? "Saving..." : "Save business"}
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>

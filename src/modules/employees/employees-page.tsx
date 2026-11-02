@@ -33,6 +33,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   "system.read": "View basic application information",
   "business.read": "View business profile",
   "catalog.read": "View products, categories, brands and units",
+  "catalog.manage": "Create and update products, categories, brands and units",
   "inventory.read": "View stock and movement history",
   "inventory.manage": "Receive stock and make stock adjustments",
   "suppliers.read": "View supplier records",
@@ -42,6 +43,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   "customer_debts.read": "View customer debts for collection",
   "customer_payments.manage": "Record customer debt repayments",
   "pos.use": "Search products and use the point of sale",
+  "sales.read": "View sales history",
   "sales.manage": "Record sales",
   "purchases.read": "View purchases and purchase costs",
   "purchases.manage": "Create purchases, receive deliveries and record supplier payments",
@@ -221,7 +223,7 @@ export function EmployeesPage() {
             <div>
               <p className="font-medium">Manager permissions</p>
               <p className="mt-1 text-sm text-muted-foreground">
-                Financial reports, expenses, cash accounts, employee access and business settings are not included in the Manager permission set.
+                Managers can handle products, stock, purchases, sales, customers and suppliers. Financial reports, expenses, cash accounts and employee access remain Owner/Admin-only. Managers can view purchase costs.
               </p>
             </div>
             {isLoadingPermissions ? (

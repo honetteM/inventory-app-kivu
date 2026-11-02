@@ -81,6 +81,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "017_manager_permissions",
         include_str!("../migrations/017_manager_permissions.sql"),
     ),
+    (
+        18,
+        "018_manager_operational_access",
+        include_str!("../migrations/018_manager_operational_access.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -113,6 +118,7 @@ pub const PERMISSION_CUSTOMERS_MANAGE: &str = "customers.manage";
 pub const PERMISSION_CUSTOMER_DEBTS_READ: &str = "customer_debts.read";
 pub const PERMISSION_CUSTOMER_PAYMENTS_MANAGE: &str = "customer_payments.manage";
 pub const PERMISSION_POS_USE: &str = "pos.use";
+pub const PERMISSION_SALES_READ: &str = "sales.read";
 pub const PERMISSION_SALES_MANAGE: &str = "sales.manage";
 pub const PERMISSION_PURCHASES_READ: &str = "purchases.read";
 pub const PERMISSION_PURCHASES_MANAGE: &str = "purchases.manage";
@@ -125,6 +131,7 @@ const MANAGER_PERMISSION_IDS: &[&str] = &[
     PERMISSION_SYSTEM_READ,
     PERMISSION_BUSINESS_READ,
     PERMISSION_CATALOG_READ,
+    PERMISSION_CATALOG_MANAGE,
     PERMISSION_INVENTORY_READ,
     PERMISSION_INVENTORY_MANAGE,
     PERMISSION_SUPPLIERS_READ,
@@ -134,6 +141,7 @@ const MANAGER_PERMISSION_IDS: &[&str] = &[
     PERMISSION_CUSTOMER_DEBTS_READ,
     PERMISSION_CUSTOMER_PAYMENTS_MANAGE,
     PERMISSION_POS_USE,
+    PERMISSION_SALES_READ,
     PERMISSION_SALES_MANAGE,
     PERMISSION_PURCHASES_READ,
     PERMISSION_PURCHASES_MANAGE,
@@ -143,6 +151,7 @@ const DEFAULT_MANAGER_PERMISSION_IDS: &[&str] = &[
     PERMISSION_SYSTEM_READ,
     PERMISSION_BUSINESS_READ,
     PERMISSION_CATALOG_READ,
+    PERMISSION_CATALOG_MANAGE,
     PERMISSION_INVENTORY_READ,
     PERMISSION_INVENTORY_MANAGE,
     PERMISSION_SUPPLIERS_READ,
@@ -152,6 +161,7 @@ const DEFAULT_MANAGER_PERMISSION_IDS: &[&str] = &[
     PERMISSION_CUSTOMER_DEBTS_READ,
     PERMISSION_CUSTOMER_PAYMENTS_MANAGE,
     PERMISSION_POS_USE,
+    PERMISSION_SALES_READ,
     PERMISSION_SALES_MANAGE,
     PERMISSION_PURCHASES_READ,
     PERMISSION_PURCHASES_MANAGE,
@@ -206,7 +216,7 @@ impl DbState {
                 JOIN user_roles ur ON ur.user_id = u.id
                 JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
                 WHERE u.id = ?1 AND u.business_id = ?2 AND u.is_active = 1
-                  AND r.name = 'owner' AND r.name = ?3
+                  AND r.name IN ('owner', 'manager') AND r.name = ?3
             )",
             params![session.id, session.business_id, session.role],
             |row| row.get(0),
@@ -289,6 +299,22 @@ fn require_permission(conn: &Connection, user: &AuthUser, permission: &str) -> R
             "your role does not have permission: {permission}"
         )))
     }
+}
+
+pub fn list_user_permissions(conn: &Connection, user: &AuthUser) -> Result<Vec<String>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT p.id
+         FROM user_roles ur
+         JOIN roles r ON r.id = ur.role_id AND r.business_id = ?2
+         JOIN role_permissions rp ON rp.role_id = r.id
+         JOIN permissions p ON p.id = rp.permission_id
+         WHERE ur.user_id = ?1
+         ORDER BY p.id",
+    )?;
+    let permissions = stmt
+        .query_map(params![user.id, user.business_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(permissions)
 }
 
 fn grant_owner_permissions(conn: &Connection, role_id: &str) -> Result<(), DbError> {
@@ -5754,8 +5780,18 @@ mod tests {
         require_permission(&conn, &owner, PERMISSION_REPORTS_READ).unwrap();
         require_permission(&conn, &owner, PERMISSION_CASH_ACCOUNTS_MANAGE).unwrap();
         require_permission(&conn, &manager, PERMISSION_INVENTORY_MANAGE).unwrap();
+        require_permission(&conn, &manager, PERMISSION_CATALOG_MANAGE).unwrap();
+        require_permission(&conn, &manager, PERMISSION_SALES_READ).unwrap();
         assert!(matches!(
             require_permission(&conn, &manager, PERMISSION_REPORTS_READ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            require_permission(&conn, &manager, PERMISSION_FINANCE_READ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            require_permission(&conn, &manager, PERMISSION_CASH_ACCOUNTS_MANAGE),
             Err(DbError::InvalidInput(_))
         ));
         let cashier_permissions: i64 = conn
@@ -5899,6 +5935,10 @@ mod tests {
             .expect("active Manager profiles can sign in");
         assert_eq!(manager_credentials.user.role, "manager");
         assert_eq!(manager_credentials.password_hash, "$argon2id$employee-hash");
+        assert!(DbState::is_active_session(&conn, &manager_credentials.user).unwrap());
+        let manager_permissions = list_user_permissions(&conn, &manager_credentials.user).unwrap();
+        assert!(manager_permissions.contains(&PERMISSION_CATALOG_MANAGE.to_string()));
+        assert!(!manager_permissions.contains(&PERMISSION_REPORTS_READ.to_string()));
         assert!(matches!(
             create_employee(
                 &conn,
@@ -6167,6 +6207,55 @@ mod tests {
         state.clear_session().unwrap();
         assert!(state.current_session_user().unwrap().is_none());
         assert!(state.with_authenticated(|_, _| Ok(())).is_err());
+    }
+
+    #[test]
+    fn manager_session_stays_authenticated_and_receives_operational_permissions() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let owner = bootstrap_owner(
+            &conn,
+            Some(&business.id),
+            None,
+            "owner",
+            "Aline Uwase",
+            "$argon2id$owner-hash",
+        )
+        .unwrap();
+        let employee = create_employee(
+            &conn,
+            &business.id,
+            &owner,
+            "manager.one",
+            "Manager One",
+            "manager",
+            "$argon2id$manager-hash",
+        )
+        .unwrap();
+        let manager = AuthUser {
+            id: employee.id,
+            business_id: employee.business_id,
+            username: employee.username,
+            full_name: employee.full_name,
+            role: employee.role,
+        };
+        let state = DbState::new(conn);
+        state.set_session(manager).unwrap();
+
+        let permissions = state.with_authenticated(list_user_permissions).unwrap();
+        assert!(permissions.contains(&PERMISSION_CATALOG_MANAGE.to_string()));
+        assert!(permissions.contains(&PERMISSION_PURCHASES_MANAGE.to_string()));
+        assert!(permissions.contains(&PERMISSION_CUSTOMER_PAYMENTS_MANAGE.to_string()));
+        assert!(!permissions.contains(&PERMISSION_REPORTS_READ.to_string()));
+        assert!(!permissions.contains(&PERMISSION_FINANCE_READ.to_string()));
+        state
+            .with_authorized(PERMISSION_CATALOG_MANAGE, |_, _| Ok(()))
+            .unwrap();
+        assert!(
+            state
+                .with_authorized(PERMISSION_REPORTS_READ, |_, _| Ok(()))
+                .is_err()
+        );
     }
 
     #[test]

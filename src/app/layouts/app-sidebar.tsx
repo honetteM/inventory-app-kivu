@@ -12,10 +12,13 @@ import {
   SidebarMenuItem,
   SidebarRail,
 } from "@/components/ui/sidebar";
-import { navGroups } from "@/app/routes/navigation";
+import { getAvailableNavGroups } from "@/app/routes/navigation";
+import { useAuthentication } from "@/modules/auth/auth-gate";
 
 export function AppSidebar() {
+  const { permissions } = useAuthentication();
   const { pathname } = useLocation();
+  const navGroups = getAvailableNavGroups(permissions);
 
   return (
     <Sidebar collapsible="icon">
