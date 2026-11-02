@@ -94,7 +94,9 @@ fn employee_list(
     business_id: String,
 ) -> Result<Vec<db::Employee>, String> {
     state
-        .with_business(&business_id, |conn| db::list_employees(conn, &business_id))
+        .with_business_permission(&business_id, db::PERMISSION_EMPLOYEES_MANAGE, |conn, _| {
+            db::list_employees(conn, &business_id)
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -112,17 +114,21 @@ fn employee_create(
     }
     let password_hash = hash_password(&password)?;
     state
-        .with_authenticated(|conn, actor| {
-            db::create_employee(
-                conn,
-                &business_id,
-                actor,
-                &username,
-                &full_name,
-                &role,
-                &password_hash,
-            )
-        })
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_EMPLOYEES_MANAGE,
+            |conn, actor| {
+                db::create_employee(
+                    conn,
+                    &business_id,
+                    actor,
+                    &username,
+                    &full_name,
+                    &role,
+                    &password_hash,
+                )
+            },
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -134,9 +140,13 @@ fn employee_set_active(
     is_active: bool,
 ) -> Result<(), String> {
     state
-        .with_authenticated(|conn, actor| {
-            db::set_employee_active(conn, &business_id, &employee_id, is_active, actor)
-        })
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_EMPLOYEES_MANAGE,
+            |conn, actor| {
+                db::set_employee_active(conn, &business_id, &employee_id, is_active, actor)
+            },
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -155,14 +165,14 @@ fn auth_current_user(state: tauri::State<db::DbState>) -> Result<Option<db::Auth
 #[tauri::command]
 fn db_info(state: tauri::State<db::DbState>) -> Result<db::DbInfo, String> {
     state
-        .with_authenticated(|conn, _| db::info(conn))
+        .with_authorized(db::PERMISSION_SYSTEM_READ, |conn, _| db::info(conn))
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn business_list(state: tauri::State<db::DbState>) -> Result<Vec<db::Business>, String> {
     state
-        .with_authenticated(|conn, user| {
+        .with_authorized(db::PERMISSION_BUSINESS_READ, |conn, user| {
             Ok(db::list_businesses(conn)?
                 .into_iter()
                 .filter(|business| business.id == user.business_id)
@@ -178,7 +188,7 @@ fn business_create(
     tax_id: Option<String>,
 ) -> Result<db::Business, String> {
     state
-        .with_authenticated(|conn, user| {
+        .with_authorized(db::PERMISSION_BUSINESS_MANAGE, |conn, user| {
             db::create_business_for_owner(conn, user, &name, tax_id.as_deref())
         })
         .map_err(|error| error.to_string())
@@ -190,9 +200,11 @@ fn cash_account_list(
     business_id: String,
 ) -> Result<Vec<db::CashAccount>, String> {
     state
-        .with_business(&business_id, |conn| {
-            db::list_cash_accounts(conn, &business_id)
-        })
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_CASH_ACCOUNTS_MANAGE,
+            |conn, _| db::list_cash_accounts(conn, &business_id),
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -204,9 +216,11 @@ fn cash_account_create(
     name: String,
 ) -> Result<db::CashAccount, String> {
     state
-        .with_authenticated(|conn, user| {
-            db::create_cash_account(conn, &business_id, user, &account_type, &name)
-        })
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_CASH_ACCOUNTS_MANAGE,
+            |conn, user| db::create_cash_account(conn, &business_id, user, &account_type, &name),
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -218,9 +232,13 @@ fn cash_account_set_active(
     is_active: bool,
 ) -> Result<(), String> {
     state
-        .with_authenticated(|conn, user| {
-            db::set_cash_account_active(conn, &business_id, &account_id, is_active, user)
-        })
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_CASH_ACCOUNTS_MANAGE,
+            |conn, user| {
+                db::set_cash_account_active(conn, &business_id, &account_id, is_active, user)
+            },
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -230,7 +248,9 @@ fn category_list(
     business_id: String,
 ) -> Result<Vec<db::Category>, String> {
     state
-        .with_business(&business_id, |conn| db::list_categories(conn, &business_id))
+        .with_business_permission(&business_id, db::PERMISSION_CATALOG_READ, |conn, _| {
+            db::list_categories(conn, &business_id)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -243,7 +263,7 @@ fn category_create(
     description: Option<String>,
 ) -> Result<db::Category, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_CATALOG_MANAGE, |conn, _| {
             db::create_category(
                 conn,
                 &business_id,
@@ -261,7 +281,9 @@ fn unit_list(
     business_id: String,
 ) -> Result<Vec<db::Unit>, String> {
     state
-        .with_business(&business_id, |conn| db::list_units(conn, &business_id))
+        .with_business_permission(&business_id, db::PERMISSION_CATALOG_READ, |conn, _| {
+            db::list_units(conn, &business_id)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -274,7 +296,7 @@ fn unit_create(
     decimals_ok: bool,
 ) -> Result<db::Unit, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_CATALOG_MANAGE, |conn, _| {
             db::create_unit(conn, &business_id, &code, &name, decimals_ok)
         })
         .map_err(|e| e.to_string())
@@ -286,7 +308,9 @@ fn brand_list(
     business_id: String,
 ) -> Result<Vec<db::Brand>, String> {
     state
-        .with_business(&business_id, |conn| db::list_brands(conn, &business_id))
+        .with_business_permission(&business_id, db::PERMISSION_CATALOG_READ, |conn, _| {
+            db::list_brands(conn, &business_id)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -297,7 +321,7 @@ fn brand_create(
     name: String,
 ) -> Result<db::Brand, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_CATALOG_MANAGE, |conn, _| {
             db::create_brand(conn, &business_id, &name)
         })
         .map_err(|e| e.to_string())
@@ -309,7 +333,9 @@ fn supplier_list(
     business_id: String,
 ) -> Result<Vec<db::Supplier>, String> {
     state
-        .with_business(&business_id, |conn| db::list_suppliers(conn, &business_id))
+        .with_business_permission(&business_id, db::PERMISSION_SUPPLIERS_READ, |conn, _| {
+            db::list_suppliers(conn, &business_id)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -325,7 +351,7 @@ fn supplier_create(
     tax_id: Option<String>,
 ) -> Result<db::Supplier, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_SUPPLIERS_MANAGE, |conn, _| {
             db::create_supplier(
                 conn,
                 &business_id,
@@ -354,7 +380,7 @@ fn supplier_update(
     is_active: bool,
 ) -> Result<db::Supplier, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_SUPPLIERS_MANAGE, |conn, _| {
             db::update_supplier(
                 conn,
                 &business_id,
@@ -377,7 +403,9 @@ fn customer_list(
     business_id: String,
 ) -> Result<Vec<db::Customer>, String> {
     state
-        .with_business(&business_id, |conn| db::list_customers(conn, &business_id))
+        .with_business_permission(&business_id, db::PERMISSION_CUSTOMERS_READ, |conn, _| {
+            db::list_customers(conn, &business_id)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -392,7 +420,7 @@ fn customer_create(
     credit_limit: i64,
 ) -> Result<db::Customer, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_CUSTOMERS_MANAGE, |conn, _| {
             db::create_customer(
                 conn,
                 &business_id,
@@ -419,7 +447,7 @@ fn customer_update(
     is_active: bool,
 ) -> Result<db::Customer, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_CUSTOMERS_MANAGE, |conn, _| {
             db::update_customer(
                 conn,
                 &business_id,
@@ -441,7 +469,7 @@ fn purchase_product_list(
     business_id: String,
 ) -> Result<Vec<db::PurchaseProduct>, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_PURCHASES_READ, |conn, _| {
             db::list_purchase_products(conn, &business_id)
         })
         .map_err(|e| e.to_string())
@@ -453,7 +481,9 @@ fn purchase_list(
     business_id: String,
 ) -> Result<Vec<db::Purchase>, String> {
     state
-        .with_business(&business_id, |conn| db::list_purchases(conn, &business_id))
+        .with_business_permission(&business_id, db::PERMISSION_PURCHASES_READ, |conn, _| {
+            db::list_purchases(conn, &business_id)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -467,7 +497,7 @@ fn purchase_create(
     authorize_duplicate: bool,
 ) -> Result<db::Purchase, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_PURCHASES_MANAGE, |conn, _| {
             db::create_purchase(
                 conn,
                 &business_id,
@@ -489,7 +519,7 @@ fn purchase_record_payment(
     payment_method: String,
 ) -> Result<db::Purchase, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_PURCHASES_MANAGE, |conn, _| {
             db::record_purchase_payment(conn, &business_id, &purchase_id, amount, &payment_method)
         })
         .map_err(|e| e.to_string())
@@ -505,7 +535,7 @@ fn purchase_receive_delivery(
     notes: Option<String>,
 ) -> Result<db::PurchaseReceipt, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_PURCHASES_MANAGE, |conn, _| {
             db::receive_purchase_delivery(
                 conn,
                 &business_id,
@@ -527,7 +557,7 @@ fn product_list(
     limit: i64,
 ) -> Result<db::ProductPage, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_CATALOG_READ, |conn, _| {
             db::list_products(conn, &business_id, search.as_deref(), offset, limit)
         })
         .map_err(|e| e.to_string())
@@ -542,7 +572,7 @@ fn pos_product_search(
     limit: i64,
 ) -> Result<db::PosProductPage, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_POS_USE, |conn, _| {
             db::search_pos_products(conn, &business_id, search.as_deref(), offset, limit)
         })
         .map_err(|e| e.to_string())
@@ -557,7 +587,7 @@ fn pos_checkout(
     payments: Vec<db::SalePaymentInput>,
 ) -> Result<db::SaleReceipt, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_SALES_MANAGE, |conn, _| {
             db::checkout_sale_with_payments(
                 conn,
                 &business_id,
@@ -575,7 +605,7 @@ fn customer_debt_list(
     business_id: String,
 ) -> Result<Vec<db::CustomerDebt>, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_FINANCE_READ, |conn, _| {
             db::list_customer_debts(conn, &business_id)
         })
         .map_err(|e| e.to_string())
@@ -588,7 +618,7 @@ fn customer_statement(
     customer_id: String,
 ) -> Result<db::CustomerStatement, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_FINANCE_READ, |conn, _| {
             db::customer_statement(conn, &business_id, &customer_id)
         })
         .map_err(|e| e.to_string())
@@ -602,7 +632,7 @@ fn expense_list(
     limit: i64,
 ) -> Result<db::ExpensePage, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_FINANCE_READ, |conn, _| {
             db::list_expenses(conn, &business_id, offset, limit)
         })
         .map_err(|e| e.to_string())
@@ -615,7 +645,7 @@ fn daily_business_report(
     report_date: String,
 ) -> Result<db::DailyBusinessReport, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_REPORTS_READ, |conn, _| {
             db::daily_business_report(conn, &business_id, &report_date)
         })
         .map_err(|e| e.to_string())
@@ -633,7 +663,7 @@ fn expense_create(
     responsible_name: String,
 ) -> Result<db::Expense, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_FINANCE_MANAGE, |conn, _| {
             db::create_expense(
                 conn,
                 &business_id,
@@ -657,7 +687,7 @@ fn customer_debt_record_payment(
     amount: i64,
 ) -> Result<db::CustomerDebtPayment, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_FINANCE_MANAGE, |conn, _| {
             db::record_customer_debt_payment(conn, &business_id, &debt_id, &payment_method, amount)
         })
         .map_err(|e| e.to_string())
@@ -682,7 +712,7 @@ fn product_create(
     vat_class: String,
 ) -> Result<db::Product, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_CATALOG_MANAGE, |conn, _| {
             db::create_product(
                 conn,
                 &business_id,
@@ -712,7 +742,7 @@ fn product_selling_price_update(
     selling_price: i64,
 ) -> Result<(), String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_CATALOG_MANAGE, |conn, _| {
             db::update_base_selling_price(conn, &business_id, &product_id, selling_price)
         })
         .map_err(|e| e.to_string())
@@ -725,7 +755,7 @@ fn product_unit_list(
     product_id: String,
 ) -> Result<Vec<db::ProductUnit>, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_CATALOG_READ, |conn, _| {
             db::list_product_units(conn, &business_id, &product_id)
         })
         .map_err(|e| e.to_string())
@@ -741,7 +771,7 @@ fn product_unit_create(
     selling_price: Option<i64>,
 ) -> Result<db::ProductUnit, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_CATALOG_MANAGE, |conn, _| {
             db::create_product_unit(
                 conn,
                 &business_id,
@@ -763,7 +793,7 @@ fn inventory_list(
     limit: i64,
 ) -> Result<db::InventoryPage, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_INVENTORY_READ, |conn, _| {
             db::list_inventory(conn, &business_id, search.as_deref(), offset, limit)
         })
         .map_err(|e| e.to_string())
@@ -778,7 +808,7 @@ fn stock_movement_list(
     limit: i64,
 ) -> Result<Vec<db::StockMovement>, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_INVENTORY_READ, |conn, _| {
             db::list_stock_movements(conn, &business_id, product_id.as_deref(), offset, limit)
         })
         .map_err(|e| e.to_string())
@@ -793,7 +823,7 @@ fn inventory_set_opening_stock(
     reason: Option<String>,
 ) -> Result<db::StockMovement, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_INVENTORY_MANAGE, |conn, _| {
             db::set_opening_stock(conn, &business_id, &product_id, quantity, reason.as_deref())
         })
         .map_err(|e| e.to_string())
@@ -808,7 +838,7 @@ fn inventory_correct_stock(
     reason: String,
 ) -> Result<db::StockMovement, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_INVENTORY_MANAGE, |conn, _| {
             db::correct_stock(conn, &business_id, &product_id, target_quantity, &reason)
         })
         .map_err(|e| e.to_string())
@@ -826,7 +856,7 @@ fn inventory_receive_stock(
     new_selling_price: Option<i64>,
 ) -> Result<db::StockMovement, String> {
     state
-        .with_business(&business_id, |conn| {
+        .with_business_permission(&business_id, db::PERMISSION_INVENTORY_MANAGE, |conn, _| {
             if let Some(new_selling_price) = new_selling_price {
                 db::receive_stock_with_selling_price(
                     conn,

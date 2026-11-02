@@ -71,6 +71,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "015_cash_ledger",
         include_str!("../migrations/015_cash_ledger.sql"),
     ),
+    (
+        16,
+        "016_role_permissions",
+        include_str!("../migrations/016_role_permissions.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -86,6 +91,27 @@ pub enum DbError {
     #[error("internal error: state lock poisoned")]
     LockPoisoned,
 }
+
+pub const PERMISSION_SYSTEM_READ: &str = "system.read";
+pub const PERMISSION_BUSINESS_READ: &str = "business.read";
+pub const PERMISSION_BUSINESS_MANAGE: &str = "business.manage";
+pub const PERMISSION_EMPLOYEES_MANAGE: &str = "employees.manage";
+pub const PERMISSION_CASH_ACCOUNTS_MANAGE: &str = "cash_accounts.manage";
+pub const PERMISSION_CATALOG_READ: &str = "catalog.read";
+pub const PERMISSION_CATALOG_MANAGE: &str = "catalog.manage";
+pub const PERMISSION_INVENTORY_READ: &str = "inventory.read";
+pub const PERMISSION_INVENTORY_MANAGE: &str = "inventory.manage";
+pub const PERMISSION_SUPPLIERS_READ: &str = "suppliers.read";
+pub const PERMISSION_SUPPLIERS_MANAGE: &str = "suppliers.manage";
+pub const PERMISSION_CUSTOMERS_READ: &str = "customers.read";
+pub const PERMISSION_CUSTOMERS_MANAGE: &str = "customers.manage";
+pub const PERMISSION_POS_USE: &str = "pos.use";
+pub const PERMISSION_SALES_MANAGE: &str = "sales.manage";
+pub const PERMISSION_PURCHASES_READ: &str = "purchases.read";
+pub const PERMISSION_PURCHASES_MANAGE: &str = "purchases.manage";
+pub const PERMISSION_FINANCE_READ: &str = "finance.read";
+pub const PERMISSION_FINANCE_MANAGE: &str = "finance.manage";
+pub const PERMISSION_REPORTS_READ: &str = "reports.read";
 
 /// Application state holding the single SQLite connection.
 pub struct DbState {
@@ -161,18 +187,30 @@ impl DbState {
         Ok(Some(session))
     }
 
-    pub fn with_business<T>(
+    pub fn with_authorized<T>(
+        &self,
+        permission: &str,
+        f: impl FnOnce(&Connection, &AuthUser) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        self.with_authenticated(|conn, user| {
+            require_permission(conn, user, permission)?;
+            f(conn, user)
+        })
+    }
+
+    pub fn with_business_permission<T>(
         &self,
         business_id: &str,
-        f: impl FnOnce(&Connection) -> Result<T, DbError>,
+        permission: &str,
+        f: impl FnOnce(&Connection, &AuthUser) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        self.with_authenticated(|conn, session| {
-            if session.business_id != business_id {
+        self.with_authorized(permission, |conn, user| {
+            if user.business_id != business_id {
                 return Err(DbError::InvalidInput(
                     "you are not signed in to this business".to_string(),
                 ));
             }
-            f(conn)
+            f(conn, user)
         })
     }
 
@@ -185,6 +223,37 @@ impl DbState {
         *self.session.lock().map_err(|_| DbError::LockPoisoned)? = None;
         Ok(())
     }
+}
+
+fn require_permission(conn: &Connection, user: &AuthUser, permission: &str) -> Result<(), DbError> {
+    let allowed: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM user_roles ur
+            JOIN roles r ON r.id = ur.role_id AND r.business_id = ?2
+            JOIN role_permissions rp ON rp.role_id = r.id
+            JOIN permissions p ON p.id = rp.permission_id
+            WHERE ur.user_id = ?1 AND p.id = ?3
+        )",
+        params![user.id, user.business_id, permission],
+        |row| row.get(0),
+    )?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(DbError::InvalidInput(format!(
+            "your role does not have permission: {permission}"
+        )))
+    }
+}
+
+fn grant_owner_permissions(conn: &Connection, role_id: &str) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO role_permissions (role_id, permission_id)
+         SELECT ?1, id FROM permissions",
+        params![role_id],
+    )?;
+    Ok(())
 }
 
 pub fn now_utc() -> String {
@@ -571,6 +640,7 @@ pub fn bootstrap_owner(
         params![business_id],
         |row| row.get(0),
     )?;
+    grant_owner_permissions(&tx, &role_id)?;
     let user_id = uuid::Uuid::new_v4().to_string();
     let timestamp = now_utc();
     tx.execute(
@@ -670,6 +740,7 @@ pub fn create_business_for_owner(
          VALUES (?1, ?2, 'owner', 'Owner', 1, ?3, ?3)",
         params![role_id, business_id, timestamp],
     )?;
+    grant_owner_permissions(&tx, &role_id)?;
     let user_id = uuid::Uuid::new_v4().to_string();
     tx.execute(
         "INSERT INTO users
@@ -5422,6 +5493,55 @@ mod tests {
     }
 
     #[test]
+    fn role_permission_migration_grants_existing_owner_roles() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pragmas(&conn).unwrap();
+        applied_versions(&conn).unwrap();
+        for (version, name, sql) in MIGRATIONS
+            .iter()
+            .take_while(|(version, _, _)| *version < 16)
+        {
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at)
+                 VALUES (?1, ?2, ?3)",
+                params![version, name, now_utc()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let business = create_business(&conn, "Existing shop", None).unwrap();
+        let owner = bootstrap_owner(
+            &conn,
+            Some(&business.id),
+            None,
+            "owner",
+            "Aline Uwase",
+            "$argon2id$owner-hash",
+        )
+        .unwrap();
+        run_migrations(&mut conn).unwrap();
+
+        require_permission(&conn, &owner, PERMISSION_REPORTS_READ).unwrap();
+        require_permission(&conn, &owner, PERMISSION_CASH_ACCOUNTS_MANAGE).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM role_permissions rp
+                 JOIN user_roles ur ON ur.role_id = rp.role_id
+                 WHERE ur.user_id = ?1",
+                params![owner.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            conn.query_row("SELECT COUNT(*) FROM permissions", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn owner_bootstrap_is_atomic_business_scoped_and_audited() {
         let conn = open_in_memory().unwrap();
 
@@ -5538,7 +5658,7 @@ mod tests {
             auth_credentials(&conn, &business.id, &employee.username)
                 .unwrap()
                 .is_none(),
-            "employee sign-in remains disabled until role permissions are enforced"
+            "employee sign-in remains disabled until the staff authentication flow is enabled"
         );
         assert!(matches!(
             create_employee(
@@ -5582,6 +5702,57 @@ mod tests {
     }
 
     #[test]
+    fn role_permissions_grant_owners_catalog_access_and_deny_ungranted_staff_actions() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let owner = bootstrap_owner(
+            &conn,
+            Some(&business.id),
+            None,
+            "owner",
+            "Aline Uwase",
+            "$argon2id$owner-hash",
+        )
+        .unwrap();
+        require_permission(&conn, &owner, PERMISSION_REPORTS_READ).unwrap();
+
+        let employee = create_employee(
+            &conn,
+            &business.id,
+            &owner,
+            "cashier",
+            "Jean Niyonzima",
+            "cashier",
+            "$argon2id$cashier-hash",
+        )
+        .unwrap();
+        let cashier = AuthUser {
+            id: employee.id,
+            business_id: employee.business_id,
+            username: employee.username,
+            full_name: employee.full_name,
+            role: employee.role,
+        };
+        assert!(matches!(
+            require_permission(&conn, &cashier, PERMISSION_POS_USE),
+            Err(DbError::InvalidInput(_))
+        ));
+
+        conn.execute(
+            "INSERT INTO role_permissions (role_id, permission_id)
+             SELECT r.id, ?1 FROM roles r
+             WHERE r.business_id = ?2 AND r.name = 'cashier'",
+            params![PERMISSION_POS_USE, business.id],
+        )
+        .unwrap();
+        require_permission(&conn, &cashier, PERMISSION_POS_USE).unwrap();
+        assert!(matches!(
+            require_permission(&conn, &cashier, PERMISSION_REPORTS_READ),
+            Err(DbError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
     fn authenticated_owner_can_create_another_business_with_the_same_login() {
         let conn = open_in_memory().unwrap();
         let business = create_business(&conn, "First shop", None).unwrap();
@@ -5606,6 +5777,7 @@ mod tests {
         assert_eq!(second_owner.user.full_name, owner.full_name);
         assert_eq!(second_owner.user.role, "owner");
         assert_eq!(second_owner.password_hash, "$argon2id$test-hash");
+        require_permission(&conn, &second_owner.user, PERMISSION_REPORTS_READ).unwrap();
         let non_owner = AuthUser {
             role: "cashier".to_string(),
             ..owner
@@ -5641,11 +5813,34 @@ mod tests {
         assert_eq!(state.current_session_user().unwrap().unwrap().id, owner.id);
         assert_eq!(
             state
-                .with_business(&business.id, |_| Ok("authorized"))
+                .with_business_permission(&business.id, PERMISSION_SYSTEM_READ, |_, _| Ok(
+                    "authorized"
+                ),)
                 .unwrap(),
             "authorized"
         );
-        assert!(state.with_business(&other_business.id, |_| Ok(())).is_err());
+        assert_eq!(
+            state
+                .with_business_permission(&business.id, PERMISSION_REPORTS_READ, |_, _| Ok(
+                    "permitted"
+                ),)
+                .unwrap(),
+            "permitted"
+        );
+        assert!(
+            state
+                .with_business_permission(&business.id, "unknown.permission", |_, _| Ok(()))
+                .is_err()
+        );
+        assert!(
+            state
+                .with_business_permission(
+                    &other_business.id,
+                    PERMISSION_SYSTEM_READ,
+                    |_, _| Ok(()),
+                )
+                .is_err()
+        );
         assert_eq!(
             state
                 .with_authenticated(|_, user| Ok(user.id.clone()))
