@@ -601,7 +601,9 @@ Allow reports to be regenerated after authorized corrections, while preserving t
 
 The first reporting slice is a manually selected, business-scoped daily summary. It includes completed sales and payment methods, unpaid credit sales, customer repayments, recorded expenses, supplier payments, received purchases, FIFO cost of goods sold, gross profit, operating result, current customer and supplier balances, and stock-adjustment event counts.
 
-Automatic scheduling and PDF export, branch data, opening/closing cash reconciliation, cash discrepancies, and worker performance remain pending. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
+Cash ledger migration 015 adds distinct cash, bank and MoMo accounts, immutable classified movements, and confirmed transfers that post paired source/destination movements. It distinguishes customer trade-debt repayments from business-loan movements. Existing financial records are intentionally not backfilled because their actual custody account, branch and responsible user are unknown.
+
+Posting existing sale, repayment, expense and supplier-payment flows into those accounts; account management UI; authenticated approvals; opening/closing balances and carry-forward; branch attribution; detailed adjustment reporting; and PDF export remain pending. Cash closing is deferred until authenticated user and permission enforcement exists. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
 
 ---
 

@@ -66,6 +66,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "014_expenses",
         include_str!("../migrations/014_expenses.sql"),
     ),
+    (
+        15,
+        "015_cash_ledger",
+        include_str!("../migrations/015_cash_ledger.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -4605,6 +4610,303 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn cash_ledger_migration_preserves_legacy_transactions_without_guessing_custody() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        apply_pragmas(&conn).unwrap();
+        applied_versions(&conn).unwrap();
+        for (version, name, sql) in MIGRATIONS
+            .iter()
+            .take_while(|(version, _, _)| *version < 15)
+        {
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(sql).unwrap();
+            tx.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at)
+                 VALUES (?1, ?2, ?3)",
+                params![version, name, now_utc()],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        create_expense(
+            &conn,
+            &business.id,
+            "rent",
+            250_000,
+            "2026-11-02",
+            "cash",
+            "Existing rent expense",
+            "Manager",
+        )
+        .unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        let expenses = list_expenses(&conn, &business.id, 0, 20).unwrap();
+        assert_eq!(expenses.total_count, 1);
+        assert_eq!(expenses.items[0].amount, 250_000);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM cash_movements", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "legacy transactions have no reliable custody-account mapping"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM cash_accounts", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn cash_accounts_and_movements_enforce_custody_and_prevent_duplicate_postings() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let branch_id = uuid::Uuid::new_v4().to_string();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let timestamp = now_utc();
+        conn.execute(
+            "INSERT INTO branches (id, business_id, name, created_at, updated_at)
+             VALUES (?1, ?2, 'Main branch', ?3, ?3)",
+            params![branch_id, business.id, timestamp],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO users
+                (id, business_id, branch_id, username, full_name, password_hash,
+                 created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'cashier', 'Cashier', 'test-hash', ?4, ?4)",
+            params![user_id, business.id, branch_id, timestamp],
+        )
+        .unwrap();
+        let cash_account_id = uuid::Uuid::new_v4().to_string();
+        let bank_account_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO cash_accounts
+                (id, business_id, branch_id, account_type, name, responsible_user_id,
+                 created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'cash_drawer', 'Cashier drawer', ?4, ?5, ?5)",
+            params![cash_account_id, business.id, branch_id, user_id, timestamp],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cash_accounts
+                (id, business_id, branch_id, account_type, name, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'bank', 'Shop bank account', ?4, ?4)",
+            params![bank_account_id, business.id, branch_id, timestamp],
+        )
+        .unwrap();
+
+        let movement_id = uuid::Uuid::new_v4().to_string();
+        let source_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO cash_movements
+                (id, business_id, account_id, movement_type, direction, amount,
+                 source_type, source_id, responsible_user_id, occurred_at, recorded_at)
+             VALUES (?1, ?2, ?3, 'sale_collection', 'in', 10_000,
+                     'sale_payment', ?4, ?5, ?6, ?6)",
+            params![
+                movement_id,
+                business.id,
+                cash_account_id,
+                source_id,
+                user_id,
+                timestamp
+            ],
+        )
+        .unwrap();
+
+        assert!(
+            conn.execute(
+                "INSERT INTO cash_movements
+                    (id, business_id, account_id, movement_type, direction, amount,
+                     source_type, source_id, responsible_user_id, occurred_at, recorded_at)
+                 VALUES (?1, ?2, ?3, 'sale_collection', 'in', 10_000,
+                         'sale_payment', ?4, ?5, ?6, ?6)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    business.id,
+                    cash_account_id,
+                    source_id,
+                    user_id,
+                    timestamp
+                ],
+            )
+            .is_err(),
+            "the same source payment must not post twice"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO cash_accounts
+                    (id, business_id, account_type, name, created_at, updated_at)
+                 VALUES (?1, ?2, 'cash_drawer', 'Unassigned drawer', ?3, ?3)",
+                params![uuid::Uuid::new_v4().to_string(), business.id, timestamp],
+            )
+            .is_err(),
+            "a worker cash drawer must identify its responsible user"
+        );
+        assert!(
+            conn.execute(
+                "INSERT INTO cash_accounts
+                    (id, business_id, branch_id, account_type, name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'bank', 'Cross-business branch', ?4, ?4)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    other_business.id,
+                    branch_id,
+                    timestamp
+                ],
+            )
+            .is_err(),
+            "an account cannot use another business's branch"
+        );
+        assert!(
+            conn.execute(
+                "UPDATE cash_movements SET amount = 9_000 WHERE id = ?1",
+                params![movement_id],
+            )
+            .is_err(),
+            "ledger movements must be immutable"
+        );
+    }
+
+    #[test]
+    fn cash_transfer_confirmation_posts_paired_immutable_movements() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let branch_id = uuid::Uuid::new_v4().to_string();
+        let initiator_id = uuid::Uuid::new_v4().to_string();
+        let confirmer_id = uuid::Uuid::new_v4().to_string();
+        let timestamp = now_utc();
+        conn.execute(
+            "INSERT INTO branches (id, business_id, name, created_at, updated_at)
+             VALUES (?1, ?2, 'Main branch', ?3, ?3)",
+            params![branch_id, business.id, timestamp],
+        )
+        .unwrap();
+        for (id, username) in [(&initiator_id, "initiator"), (&confirmer_id, "confirmer")] {
+            conn.execute(
+                "INSERT INTO users
+                    (id, business_id, branch_id, username, full_name, password_hash,
+                     created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4, 'test-hash', ?5, ?5)",
+                params![id, business.id, branch_id, username, timestamp],
+            )
+            .unwrap();
+        }
+        let from_account = uuid::Uuid::new_v4().to_string();
+        let to_account = uuid::Uuid::new_v4().to_string();
+        for (account_id, account_type, name, responsible_user_id) in [
+            (
+                &from_account,
+                "cash_drawer",
+                "Cash drawer",
+                Some(&initiator_id),
+            ),
+            (&to_account, "mtn_wallet", "MTN wallet", None),
+        ] {
+            conn.execute(
+                "INSERT INTO cash_accounts
+                    (id, business_id, branch_id, account_type, name, responsible_user_id,
+                     created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![
+                    account_id,
+                    business.id,
+                    branch_id,
+                    account_type,
+                    name,
+                    responsible_user_id,
+                    timestamp
+                ],
+            )
+            .unwrap();
+        }
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO cash_transfers
+                (id, business_id, from_account_id, to_account_id, amount,
+                 occurred_at, initiated_by_user_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, 25_000, ?5, ?6, ?5)",
+            params![
+                transfer_id,
+                business.id,
+                from_account,
+                to_account,
+                timestamp,
+                initiator_id
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cash_movements WHERE transfer_id = ?1",
+                params![transfer_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0,
+            "pending transfers must not affect account balances"
+        );
+
+        conn.execute(
+            "UPDATE cash_transfers
+             SET status = 'confirmed', confirmed_by_user_id = ?1, confirmed_at = ?2
+             WHERE id = ?3",
+            params![confirmer_id, timestamp, transfer_id],
+        )
+        .unwrap();
+
+        let movements = conn
+            .prepare(
+                "SELECT account_id, movement_type, direction, amount
+                 FROM cash_movements WHERE transfer_id = ?1 ORDER BY source_leg",
+            )
+            .unwrap()
+            .query_map(params![transfer_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            movements,
+            vec![
+                (
+                    to_account,
+                    "transfer_in".to_string(),
+                    "in".to_string(),
+                    25_000
+                ),
+                (
+                    from_account,
+                    "transfer_out".to_string(),
+                    "out".to_string(),
+                    25_000
+                )
+            ]
+        );
+        assert!(
+            conn.execute(
+                "UPDATE cash_transfers SET amount = 30_000 WHERE id = ?1",
+                params![transfer_id],
+            )
+            .is_err(),
+            "a confirmed transfer must not be overwritten"
+        );
     }
 
     #[test]
