@@ -10,6 +10,7 @@ import { BusinessSetupPage } from "@/modules/settings/business-setup-page";
 import { SuppliersPage } from "@/modules/suppliers/suppliers-page";
 import { CustomersPage } from "@/modules/customers/customers-page";
 import { PaymentsPage } from "@/modules/payments/payments-page";
+import { ExpensesPage } from "@/modules/expenses/expenses-page";
 
 const placeholder = (title: string, description: string) => (
   <PagePlaceholder title={title} description={description} />
@@ -28,7 +29,7 @@ export const router = createBrowserRouter([
       { path: "sales", element: placeholder("Sales History", "Completed transactions and returns.") },
       { path: "customers", element: <CustomersPage /> },
       { path: "suppliers", element: <SuppliersPage /> },
-      { path: "expenses", element: placeholder("Expenses", "Operational expense tracking.") },
+      { path: "expenses", element: <ExpensesPage /> },
       { path: "payments", element: <PaymentsPage /> },
       { path: "reports", element: placeholder("Reports", "Daily, weekly and monthly business reports.") },
       { path: "employees", element: placeholder("Employees", "Users, roles and permissions.") },

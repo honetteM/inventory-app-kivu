@@ -380,6 +380,45 @@ fn customer_statement(
 }
 
 #[tauri::command]
+fn expense_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    offset: i64,
+    limit: i64,
+) -> Result<db::ExpensePage, String> {
+    state
+        .with(|conn| db::list_expenses(conn, &business_id, offset, limit))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn expense_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    category: String,
+    amount: i64,
+    expense_date: String,
+    payment_method: String,
+    description: String,
+    responsible_name: String,
+) -> Result<db::Expense, String> {
+    state
+        .with(|conn| {
+            db::create_expense(
+                conn,
+                &business_id,
+                &category,
+                amount,
+                &expense_date,
+                &payment_method,
+                &description,
+                &responsible_name,
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn customer_debt_record_payment(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -604,6 +643,8 @@ pub fn run() {
             customer_update,
             customer_debt_list,
             customer_statement,
+            expense_list,
+            expense_create,
             customer_debt_record_payment,
             purchase_product_list,
             purchase_list,

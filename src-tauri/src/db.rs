@@ -61,6 +61,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "013_customer_credit",
         include_str!("../migrations/013_customer_credit.sql"),
     ),
+    (
+        14,
+        "014_expenses",
+        include_str!("../migrations/014_expenses.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -1203,6 +1208,193 @@ fn load_customer_debt(
         .filter(|balance| *balance >= 0)
         .ok_or_else(|| DbError::InvalidInput("customer payments exceed the debt".to_string()))?;
     Ok(debt)
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct Expense {
+    pub id: String,
+    pub business_id: String,
+    pub category: String,
+    pub amount: i64,
+    pub expense_date: String,
+    pub payment_method: String,
+    pub description: String,
+    pub responsible_name: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ExpensePage {
+    pub items: Vec<Expense>,
+    pub total_count: i64,
+}
+
+fn validate_expense_category(category: &str) -> Result<(), DbError> {
+    if !matches!(
+        category,
+        "rent"
+            | "electricity"
+            | "transport"
+            | "salaries"
+            | "internet"
+            | "repairs"
+            | "security"
+            | "other"
+    ) {
+        return Err(DbError::InvalidInput(
+            "select a supported expense category".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_expense_date(expense_date: &str) -> Result<(), DbError> {
+    let parsed = chrono::NaiveDate::parse_from_str(expense_date, "%Y-%m-%d")
+        .map_err(|_| DbError::InvalidInput("enter a valid expense date".to_string()))?;
+    if parsed.format("%Y-%m-%d").to_string() != expense_date {
+        return Err(DbError::InvalidInput(
+            "enter a valid expense date".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn map_expense(row: &rusqlite::Row<'_>) -> rusqlite::Result<Expense> {
+    Ok(Expense {
+        id: row.get(0)?,
+        business_id: row.get(1)?,
+        category: row.get(2)?,
+        amount: row.get(3)?,
+        expense_date: row.get(4)?,
+        payment_method: row.get(5)?,
+        description: row.get(6)?,
+        responsible_name: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+pub fn list_expenses(
+    conn: &Connection,
+    business_id: &str,
+    offset: i64,
+    limit: i64,
+) -> Result<ExpensePage, DbError> {
+    if offset < 0 || !(1..=200).contains(&limit) {
+        return Err(DbError::InvalidInput(
+            "expense pagination must use a non-negative offset and a limit from 1 to 200"
+                .to_string(),
+        ));
+    }
+    let total_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM expenses WHERE business_id = ?1",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT id, business_id, category, amount, expense_date, payment_method,
+                description, responsible_name, created_at
+         FROM expenses WHERE business_id = ?1
+         ORDER BY expense_date DESC, created_at DESC, id
+         LIMIT ?2 OFFSET ?3",
+    )?;
+    let items = stmt
+        .query_map(params![business_id, limit, offset], map_expense)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ExpensePage { items, total_count })
+}
+
+pub fn create_expense(
+    conn: &Connection,
+    business_id: &str,
+    category: &str,
+    amount: i64,
+    expense_date: &str,
+    payment_method: &str,
+    description: &str,
+    responsible_name: &str,
+) -> Result<Expense, DbError> {
+    validate_expense_category(category)?;
+    validate_expense_date(expense_date)?;
+    if !valid_sale_payment_method(payment_method) {
+        return Err(DbError::InvalidInput(
+            "select a supported payment method".to_string(),
+        ));
+    }
+    if amount <= 0 {
+        return Err(DbError::InvalidInput(
+            "expense amount must be greater than zero".to_string(),
+        ));
+    }
+    let description = description.trim();
+    if description.is_empty() || description.chars().count() > 1000 {
+        return Err(DbError::InvalidInput(
+            "description must contain 1 to 1000 characters".to_string(),
+        ));
+    }
+    let responsible_name = responsible_name.trim();
+    if responsible_name.is_empty() || responsible_name.chars().count() > 160 {
+        return Err(DbError::InvalidInput(
+            "responsible person must contain 1 to 160 characters".to_string(),
+        ));
+    }
+    let business_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM businesses WHERE id = ?1)",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    if !business_exists {
+        return Err(DbError::InvalidInput("business does not exist".to_string()));
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO expenses
+            (id, business_id, category, amount, expense_date, payment_method,
+             description, responsible_name, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            id,
+            business_id,
+            category,
+            amount,
+            expense_date,
+            payment_method,
+            description,
+            responsible_name,
+            timestamp
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, 'expense_created', 'expense', ?3, ?4, ?5)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            id,
+            serde_json::json!({
+                "category": category,
+                "amount": amount,
+                "expense_date": expense_date,
+                "payment_method": payment_method,
+                "responsible_name": responsible_name
+            })
+            .to_string(),
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+
+    conn.query_row(
+        "SELECT id, business_id, category, amount, expense_date, payment_method,
+                description, responsible_name, created_at
+         FROM expenses WHERE id = ?1 AND business_id = ?2",
+        params![id, business_id],
+        map_expense,
+    )
+    .map_err(DbError::Sqlite)
 }
 
 pub fn list_customer_debts(
@@ -5082,6 +5274,128 @@ mod tests {
             Err(DbError::InvalidInput(_))
         ));
         assert!(list_customers(&conn, &business.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn expenses_are_business_scoped_and_create_audit_records() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+
+        let expense = create_expense(
+            &conn,
+            &business.id,
+            "electricity",
+            125_050,
+            "2026-11-02",
+            "mtn_mobile_money",
+            "  Monthly electricity bill  ",
+            "  Aline Uwase  ",
+        )
+        .unwrap();
+        create_expense(
+            &conn,
+            &other_business.id,
+            "rent",
+            500_000,
+            "2026-11-01",
+            "bank_transfer",
+            "November rent",
+            "Manager",
+        )
+        .unwrap();
+
+        assert_eq!(expense.category, "electricity");
+        assert_eq!(expense.amount, 125_050);
+        assert_eq!(expense.description, "Monthly electricity bill");
+        assert_eq!(expense.responsible_name, "Aline Uwase");
+        let expenses = list_expenses(&conn, &business.id, 0, 20).unwrap();
+        assert_eq!(expenses.total_count, 1);
+        assert_eq!(expenses.items.len(), 1);
+        assert_eq!(expenses.items[0].id, expense.id);
+        assert_eq!(
+            list_expenses(&conn, &other_business.id, 0, 20)
+                .unwrap()
+                .total_count,
+            1
+        );
+        let audit_record: (String, String, String) = conn
+            .query_row(
+                "SELECT action, entity_type, entity_id FROM audit_logs WHERE entity_id = ?1",
+                params![expense.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            audit_record,
+            (
+                "expense_created".to_string(),
+                "expense".to_string(),
+                expense.id
+            )
+        );
+    }
+
+    #[test]
+    fn expense_creation_rejects_invalid_category_amount_date_payment_and_text() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let valid = (
+            "rent",
+            100_i64,
+            "2026-11-02",
+            "cash",
+            "November shop rent",
+            "Manager",
+        );
+        let attempts = [
+            (
+                "inventory_purchase",
+                valid.1,
+                valid.2,
+                valid.3,
+                valid.4,
+                valid.5,
+            ),
+            (valid.0, 0, valid.2, valid.3, valid.4, valid.5),
+            (valid.0, valid.1, "2026-02-30", valid.3, valid.4, valid.5),
+            (valid.0, valid.1, valid.2, "credit", valid.4, valid.5),
+            (valid.0, valid.1, valid.2, valid.3, " ", valid.5),
+            (valid.0, valid.1, valid.2, valid.3, valid.4, " "),
+        ];
+        for (category, amount, date, method, description, responsible) in attempts {
+            assert!(matches!(
+                create_expense(
+                    &conn,
+                    &business.id,
+                    category,
+                    amount,
+                    date,
+                    method,
+                    description,
+                    responsible
+                ),
+                Err(DbError::InvalidInput(_))
+            ));
+        }
+        assert!(matches!(
+            list_expenses(&conn, &business.id, -1, 20),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            list_expenses(&conn, &business.id, 0, 201),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(
+            list_expenses(&conn, &business.id, 0, 20)
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        let audit_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_logs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(audit_count, 0);
     }
 
     #[test]
