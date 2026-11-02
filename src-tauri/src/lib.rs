@@ -369,6 +369,17 @@ fn customer_debt_list(
 }
 
 #[tauri::command]
+fn customer_statement(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    customer_id: String,
+) -> Result<db::CustomerStatement, String> {
+    state
+        .with(|conn| db::customer_statement(conn, &business_id, &customer_id))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn customer_debt_record_payment(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -592,6 +603,7 @@ pub fn run() {
             customer_create,
             customer_update,
             customer_debt_list,
+            customer_statement,
             customer_debt_record_payment,
             purchase_product_list,
             purchase_list,

@@ -1031,11 +1031,128 @@ pub struct CustomerDebtPayment {
     pub created_at: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct CustomerStatementEntry {
+    pub id: String,
+    pub transaction_number: String,
+    pub entry_type: String,
+    pub payment_method: Option<String>,
+    pub amount: i64,
+    pub balance_after: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct CustomerStatement {
+    pub customer: Customer,
+    pub total_sales: i64,
+    pub total_payments: i64,
+    pub outstanding_balance: i64,
+    pub entries: Vec<CustomerStatementEntry>,
+}
+
 fn valid_sale_payment_method(payment_method: &str) -> bool {
     matches!(
         payment_method,
         "cash" | "mtn_mobile_money" | "airtel_money" | "bank_transfer"
     )
+}
+
+pub fn customer_statement(
+    conn: &Connection,
+    business_id: &str,
+    customer_id: &str,
+) -> Result<CustomerStatement, DbError> {
+    let customer = load_customer(conn, business_id, customer_id)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, transaction_number, entry_type, payment_method, amount, created_at, order_rank
+         FROM (
+             SELECT s.id, s.transaction_number, 'sale' AS entry_type,
+                    NULL AS payment_method, s.total AS amount, s.created_at, 0 AS order_rank
+             FROM sales s
+             WHERE s.business_id = ?1 AND s.customer_id = ?2 AND s.status = 'completed'
+             UNION ALL
+             SELECT sp.id, s.transaction_number, 'sale_payment' AS entry_type,
+                    sp.payment_method, sp.amount, sp.created_at, 1 AS order_rank
+             FROM sale_payments sp
+             JOIN sales s ON s.id = sp.sale_id
+             WHERE s.business_id = ?1 AND s.customer_id = ?2 AND s.status = 'completed'
+             UNION ALL
+             SELECT dp.id, s.transaction_number, 'repayment' AS entry_type,
+                    dp.payment_method, dp.amount, dp.created_at, 2 AS order_rank
+             FROM customer_debt_payments dp
+             JOIN customer_debts d
+               ON d.id = dp.debt_id AND d.business_id = dp.business_id
+             JOIN sales s ON s.id = d.sale_id AND s.business_id = d.business_id
+             WHERE dp.business_id = ?1 AND d.customer_id = ?2 AND s.status = 'completed'
+         )
+         ORDER BY created_at, order_rank, id",
+    )?;
+    let raw_entries = stmt
+        .query_map(params![business_id, customer_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut total_sales = 0_i64;
+    let mut total_payments = 0_i64;
+    let mut balance = 0_i64;
+    let mut entries = Vec::with_capacity(raw_entries.len());
+    for (id, transaction_number, entry_type, payment_method, amount, created_at) in raw_entries {
+        let is_sale = entry_type == "sale";
+        if is_sale {
+            total_sales = total_sales.checked_add(amount).ok_or_else(|| {
+                DbError::InvalidInput("customer sales total exceeds the supported limit".into())
+            })?;
+            balance = balance.checked_add(amount).ok_or_else(|| {
+                DbError::InvalidInput(
+                    "customer statement balance exceeds the supported limit".into(),
+                )
+            })?;
+        } else {
+            total_payments = total_payments.checked_add(amount).ok_or_else(|| {
+                DbError::InvalidInput("customer payment total exceeds the supported limit".into())
+            })?;
+            balance = balance
+                .checked_sub(amount)
+                .filter(|value| *value >= 0)
+                .ok_or_else(|| {
+                    DbError::InvalidInput(
+                        "customer statement payments exceed recorded sales".into(),
+                    )
+                })?;
+        }
+        entries.push(CustomerStatementEntry {
+            id,
+            transaction_number,
+            entry_type,
+            payment_method,
+            amount,
+            balance_after: balance,
+            created_at,
+        });
+    }
+
+    if balance != customer.outstanding_balance {
+        return Err(DbError::InvalidInput(
+            "customer statement does not match the outstanding balance".to_string(),
+        ));
+    }
+
+    Ok(CustomerStatement {
+        outstanding_balance: customer.outstanding_balance,
+        customer,
+        total_sales,
+        total_payments,
+        entries,
+    })
 }
 
 fn load_customer_debt(
@@ -5197,6 +5314,75 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sales", [], |row| row.get(0))
             .unwrap();
         assert_eq!(sales_count, 1);
+    }
+
+    #[test]
+    fn customer_statement_reconciles_sales_initial_payments_and_later_repayments() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let customer = create_customer(
+            &conn,
+            &business.id,
+            "Aline Mukamana",
+            None,
+            None,
+            "individual",
+            20_000,
+        )
+        .unwrap();
+        let product = create_test_product(&conn, &business.id, "POS-STATEMENT-01");
+        set_opening_stock(&conn, &business.id, &product.id, 3_000, None).unwrap();
+        update_base_selling_price(&conn, &business.id, &product.id, 15_000).unwrap();
+        let item = SaleItemInput {
+            product_id: product.id.clone(),
+            quantity: 1_000,
+            selling_price: None,
+            price_change_reason: None,
+        };
+        let receipt = checkout_sale_with_payments(
+            &conn,
+            &business.id,
+            &[item],
+            Some(&customer.id),
+            &[SalePaymentInput {
+                payment_method: "cash".to_string(),
+                amount: 5_000,
+            }],
+        )
+        .unwrap();
+        let debt = list_customer_debts(&conn, &business.id).unwrap().remove(0);
+        record_customer_debt_payment(&conn, &business.id, &debt.id, "mtn_mobile_money", 1_000)
+            .unwrap();
+
+        let statement = customer_statement(&conn, &business.id, &customer.id).unwrap();
+        assert_eq!(statement.customer.id, customer.id);
+        assert_eq!(statement.total_sales, 15_000);
+        assert_eq!(statement.total_payments, 6_000);
+        assert_eq!(statement.outstanding_balance, 9_000);
+        assert_eq!(statement.entries.len(), 3);
+        assert_eq!(statement.entries[0].entry_type, "sale");
+        assert_eq!(
+            statement.entries[0].transaction_number,
+            receipt.transaction_number
+        );
+        assert_eq!(statement.entries[0].amount, 15_000);
+        assert_eq!(statement.entries[0].balance_after, 15_000);
+        assert_eq!(statement.entries[1].entry_type, "sale_payment");
+        assert_eq!(statement.entries[1].payment_method.as_deref(), Some("cash"));
+        assert_eq!(statement.entries[1].amount, 5_000);
+        assert_eq!(statement.entries[1].balance_after, 10_000);
+        assert_eq!(statement.entries[2].entry_type, "repayment");
+        assert_eq!(
+            statement.entries[2].payment_method.as_deref(),
+            Some("mtn_mobile_money")
+        );
+        assert_eq!(statement.entries[2].amount, 1_000);
+        assert_eq!(statement.entries[2].balance_after, 9_000);
+        assert!(matches!(
+            customer_statement(&conn, "other-business", &customer.id),
+            Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+                | Err(DbError::InvalidInput(_))
+        ));
     }
 
     #[test]

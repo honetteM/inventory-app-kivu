@@ -1,10 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useState, type FormEvent } from "react";
-import { LoaderCircle, Pencil, Plus, Search, Save, UserRound, X } from "lucide-react";
+import { FileText, LoaderCircle, Pencil, Plus, Search, Save, UserRound, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/shared/page-header";
@@ -27,6 +34,24 @@ interface Customer {
   credit_limit: number;
   outstanding_balance: number;
   is_active: boolean;
+}
+
+interface CustomerStatementEntry {
+  id: string;
+  transaction_number: string;
+  entry_type: "sale" | "sale_payment" | "repayment";
+  payment_method: string | null;
+  amount: number;
+  balance_after: number;
+  created_at: string;
+}
+
+interface CustomerStatement {
+  customer: Customer;
+  total_sales: number;
+  total_payments: number;
+  outstanding_balance: number;
+  entries: CustomerStatementEntry[];
 }
 
 interface CustomerForm {
@@ -72,6 +97,16 @@ function formatMoney(scaledAmount: number): string {
   return `${formattedWhole}${fraction === 0n ? "" : `.${fraction.toString().padStart(2, "0")}`} RWF`;
 }
 
+function paymentMethodLabel(method: string): string {
+  const labels: Record<string, string> = {
+    cash: "Cash",
+    mtn_mobile_money: "MTN Mobile Money",
+    airtel_money: "Airtel Money",
+    bank_transfer: "Bank transfer",
+  };
+  return labels[method] ?? method;
+}
+
 function formFromCustomer(customer: Customer): CustomerForm {
   return {
     name: customer.name,
@@ -90,8 +125,12 @@ export function CustomersPage() {
   const [form, setForm] = useState<CustomerForm>(EMPTY_FORM);
   const [search, setSearch] = useState("");
   const [editingCustomerId, setEditingCustomerId] = useState<string | null>(null);
+  const [statementCustomerId, setStatementCustomerId] = useState<string | null>(null);
+  const [statement, setStatement] = useState<CustomerStatement | null>(null);
+  const [statementError, setStatementError] = useState<string | null>(null);
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
   const [isLoadingCustomers, setIsLoadingCustomers] = useState(false);
+  const [isLoadingStatement, setIsLoadingStatement] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -216,6 +255,33 @@ export function CustomersPage() {
     setError(null);
   }
 
+  async function viewStatement(customer: Customer) {
+    setStatementCustomerId(customer.id);
+    setStatement(null);
+    setStatementError(null);
+    setError(null);
+    setIsLoadingStatement(true);
+    try {
+      const result = await invoke<CustomerStatement>("customer_statement", {
+        businessId,
+        customerId: customer.id,
+      });
+      setStatement(result);
+    } catch (cause) {
+      setStatementError(`Could not load the customer statement. ${errorText(cause)}`);
+    } finally {
+      setIsLoadingStatement(false);
+    }
+  }
+
+  function closeStatement(open: boolean) {
+    if (!open) {
+      setStatementCustomerId(null);
+      setStatement(null);
+      setStatementError(null);
+    }
+  }
+
   const normalizedSearch = search.trim().toLocaleLowerCase();
   const filteredCustomers = customers.filter((customer) =>
     [customer.name, customer.phone ?? "", customer.address ?? ""]
@@ -235,6 +301,7 @@ export function CustomersPage() {
             onChange={(event) => {
               setBusinessId(event.target.value);
               resetForm();
+              closeStatement(false);
             }}
           >
             {businesses.map((business) => (
@@ -349,7 +416,7 @@ export function CustomersPage() {
                       onChange={(event) => setForm((current) => ({ ...current, creditLimit: event.target.value }))}
                     />
                     <p className="text-xs leading-5 text-muted-foreground">
-                      Stored for future credit-sale controls. Credit sales and balances are not enabled yet.
+                      Credit sales are checked against this limit and outstanding balances.
                     </p>
                   </div>
                   {editingCustomerId ? (
@@ -435,15 +502,27 @@ export function CustomersPage() {
                             Outstanding balance: {formatMoney(customer.outstanding_balance)}
                           </p>
                         </div>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => editCustomer(customer)}
-                        >
-                          <Pencil />
-                          Edit
-                        </Button>
+                        <div className="flex shrink-0 gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={isLoadingStatement}
+                            onClick={() => void viewStatement(customer)}
+                          >
+                            <FileText />
+                            Statement
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => editCustomer(customer)}
+                          >
+                            <Pencil />
+                            Edit
+                          </Button>
+                        </div>
                       </li>
                     ))}
                   </ul>
@@ -454,11 +533,115 @@ export function CustomersPage() {
           <Card>
             <CardContent className="flex items-start gap-3 py-4 text-sm text-muted-foreground">
               <UserRound className="mt-0.5 size-4 shrink-0" />
-              Customer purchase history, credit balances, and repayments will be added in the credit-management step.
+              Review each customer&apos;s sale and payment history from their statement.
             </CardContent>
           </Card>
         </>
       )}
+      <Dialog open={statementCustomerId !== null} onOpenChange={closeStatement}>
+        <DialogContent className="max-h-[85vh] w-full max-w-4xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              {statement?.customer.name ?? "Customer statement"}
+            </DialogTitle>
+            <DialogDescription>
+              Sales, payments received, and running outstanding balance.
+            </DialogDescription>
+          </DialogHeader>
+          {isLoadingStatement ? (
+            <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
+              <LoaderCircle className="size-4 animate-spin" />
+              Loading customer statement...
+            </div>
+          ) : statementError ? (
+            <div role="alert" className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+              {statementError}
+            </div>
+          ) : statement ? (
+            <div className="space-y-5">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="rounded-lg border p-3">
+                  <p className="text-xs text-muted-foreground">Total sales</p>
+                  <p className="mt-1 font-semibold">{formatMoney(statement.total_sales)}</p>
+                </div>
+                <div className="rounded-lg border p-3">
+                  <p className="text-xs text-muted-foreground">Total payments</p>
+                  <p className="mt-1 font-semibold">{formatMoney(statement.total_payments)}</p>
+                </div>
+                <div className="rounded-lg border p-3">
+                  <p className="text-xs text-muted-foreground">Outstanding balance</p>
+                  <p className="mt-1 font-semibold">{formatMoney(statement.outstanding_balance)}</p>
+                </div>
+              </div>
+              {statement.customer.phone || statement.customer.address ? (
+                <div className="text-sm text-muted-foreground">
+                  {statement.customer.phone ? <p>Phone: {statement.customer.phone}</p> : null}
+                  {statement.customer.address ? <p>{statement.customer.address}</p> : null}
+                </div>
+              ) : null}
+              {statement.entries.length === 0 ? (
+                <p className="py-6 text-center text-sm text-muted-foreground">
+                  No sales or payments have been recorded for this customer.
+                </p>
+              ) : (
+                <div className="overflow-x-auto rounded-lg border">
+                  <table className="w-full min-w-[680px] text-sm">
+                    <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
+                      <tr>
+                        <th className="px-3 py-2.5 font-medium">Date</th>
+                        <th className="px-3 py-2.5 font-medium">Transaction</th>
+                        <th className="px-3 py-2.5 font-medium">Details</th>
+                        <th className="px-3 py-2.5 text-right font-medium">Charge</th>
+                        <th className="px-3 py-2.5 text-right font-medium">Payment</th>
+                        <th className="px-3 py-2.5 text-right font-medium">Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {statement.entries.map((entry) => {
+                        const isSale = entry.entry_type === "sale";
+                        const label = isSale
+                          ? "Sale"
+                          : entry.entry_type === "sale_payment"
+                            ? "Payment at sale"
+                            : "Repayment";
+                        return (
+                          <tr key={`${entry.entry_type}-${entry.id}`}>
+                            <td className="whitespace-nowrap px-3 py-3 text-muted-foreground">
+                              {new Date(entry.created_at).toLocaleString()}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-3 font-medium">
+                              {entry.transaction_number}
+                            </td>
+                            <td className="px-3 py-3">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <Badge variant={isSale ? "secondary" : "outline"}>{label}</Badge>
+                                {entry.payment_method ? (
+                                  <span className="text-muted-foreground">
+                                    {paymentMethodLabel(entry.payment_method)}
+                                  </span>
+                                ) : null}
+                              </div>
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-3 text-right">
+                              {isSale ? formatMoney(entry.amount) : "—"}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-3 text-right">
+                              {isSale ? "—" : formatMoney(entry.amount)}
+                            </td>
+                            <td className="whitespace-nowrap px-3 py-3 text-right font-medium">
+                              {formatMoney(entry.balance_after)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
