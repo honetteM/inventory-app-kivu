@@ -94,9 +94,9 @@ fn auth_logout(state: tauri::State<db::DbState>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn auth_current_user(state: tauri::State<db::DbState>) -> Result<db::AuthUser, String> {
+fn auth_current_user(state: tauri::State<db::DbState>) -> Result<Option<db::AuthUser>, String> {
     state
-        .with_authenticated(|_, user| Ok(user.clone()))
+        .current_session_user()
         .map_err(|error| error.to_string())
 }
 

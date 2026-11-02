@@ -120,7 +120,17 @@ impl DbState {
             .clone()
             .ok_or_else(|| DbError::InvalidInput("sign in to continue".to_string()))?;
         let conn = self.conn.lock().map_err(|_| DbError::LockPoisoned)?;
-        let active_user: bool = conn.query_row(
+        if !Self::is_active_session(&conn, &session)? {
+            self.clear_session()?;
+            return Err(DbError::InvalidInput(
+                "your account is inactive or no longer authorized; sign in again".to_string(),
+            ));
+        }
+        f(&conn, &session)
+    }
+
+    fn is_active_session(conn: &Connection, session: &AuthUser) -> Result<bool, DbError> {
+        conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM users u
                 JOIN user_roles ur ON ur.user_id = u.id
@@ -130,14 +140,25 @@ impl DbState {
             )",
             params![session.id, session.business_id, session.role],
             |row| row.get(0),
-        )?;
-        if !active_user {
-            *self.session.lock().map_err(|_| DbError::LockPoisoned)? = None;
-            return Err(DbError::InvalidInput(
-                "your account is inactive or no longer authorized; sign in again".to_string(),
-            ));
+        )
+        .map_err(DbError::from)
+    }
+
+    pub fn current_session_user(&self) -> Result<Option<AuthUser>, DbError> {
+        let Some(session) = self
+            .session
+            .lock()
+            .map_err(|_| DbError::LockPoisoned)?
+            .clone()
+        else {
+            return Ok(None);
+        };
+        let conn = self.conn.lock().map_err(|_| DbError::LockPoisoned)?;
+        if !Self::is_active_session(&conn, &session)? {
+            self.clear_session()?;
+            return Ok(None);
         }
-        f(&conn, &session)
+        Ok(Some(session))
     }
 
     pub fn with_business<T>(
@@ -5151,7 +5172,9 @@ mod tests {
             state.with_authenticated(|_, user| Ok(user.clone())),
             Err(DbError::InvalidInput(_))
         ));
+        assert!(state.current_session_user().unwrap().is_none());
         state.set_session(owner.clone()).unwrap();
+        assert_eq!(state.current_session_user().unwrap().unwrap().id, owner.id);
         assert_eq!(
             state
                 .with_business(&business.id, |_| Ok("authorized"))
@@ -5166,6 +5189,7 @@ mod tests {
             owner.id
         );
         state.clear_session().unwrap();
+        assert!(state.current_session_user().unwrap().is_none());
         assert!(state.with_authenticated(|_, _| Ok(())).is_err());
     }
 

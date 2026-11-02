@@ -57,23 +57,33 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let active = true;
-    invoke<BusinessStatus[]>("auth_business_status")
-      .then((result) => {
+    async function restoreAuthentication() {
+      try {
+        const currentUser = await invoke<AuthUser | null>("auth_current_user");
+        if (currentUser) {
+          if (active) {
+            setUser(currentUser);
+          }
+          return;
+        }
+
+        const result = await invoke<BusinessStatus[]>("auth_business_status");
         if (active) {
           setBusinesses(result);
           setBusinessId(result[0]?.id ?? "");
         }
-      })
-      .catch((cause: unknown) => {
+      } catch (cause) {
         if (active) {
-          setError(`Could not load sign-in information. ${errorText(cause)}`);
+          setError(`Could not restore sign-in information. ${errorText(cause)}`);
         }
-      })
-      .finally(() => {
+      } finally {
         if (active) {
           setIsLoading(false);
         }
-      });
+      }
+    }
+
+    void restoreAuthentication();
     return () => {
       active = false;
     };
