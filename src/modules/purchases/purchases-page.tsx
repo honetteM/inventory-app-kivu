@@ -9,12 +9,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/shared/page-header";
 import { SelectField } from "@/components/shared/select-field";
+import {
+  accountsForPaymentMethod,
+  loadCashAccountPaymentOptions,
+  type CashAccountPaymentOption,
+  type PaymentMethod,
+} from "@/modules/cash-accounts/cash-account-payment-options";
 
 const QUANTITY_SCALE = 1000n;
 const MONEY_SCALE = 100n;
 const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
-type PaymentMethod = "cash" | "mtn_mobile_money" | "airtel_money" | "bank_transfer";
-
 const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
   { value: "cash", label: "Cash" },
   { value: "mtn_mobile_money", label: "MTN Mobile Money" },
@@ -208,6 +212,7 @@ export function PurchasesPage() {
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [products, setProducts] = useState<PurchaseProduct[]>([]);
   const [purchases, setPurchases] = useState<Purchase[]>([]);
+  const [cashAccounts, setCashAccounts] = useState<CashAccountPaymentOption[]>([]);
   const [supplierId, setSupplierId] = useState("");
   const [invoiceNumber, setInvoiceNumber] = useState("");
   const [draftLines, setDraftLines] = useState<DraftLine[]>([]);
@@ -219,10 +224,12 @@ export function PurchasesPage() {
   const [receiveNotes, setReceiveNotes] = useState<Record<string, string>>({});
   const [paymentAmounts, setPaymentAmounts] = useState<Record<string, string>>({});
   const [paymentMethods, setPaymentMethods] = useState<Record<string, PaymentMethod>>({});
+  const [paymentAccountIds, setPaymentAccountIds] = useState<Record<string, string>>({});
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
   const [duplicateAuthorizationRequested, setDuplicateAuthorizationRequested] = useState(false);
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
   const [isLoadingData, setIsLoadingData] = useState(false);
+  const [isLoadingCashAccounts, setIsLoadingCashAccounts] = useState(false);
   const [isSavingPurchase, setIsSavingPurchase] = useState(false);
   const [receivingPurchaseId, setReceivingPurchaseId] = useState<string | null>(null);
   const [payingPurchaseId, setPayingPurchaseId] = useState<string | null>(null);
@@ -278,6 +285,7 @@ export function PurchasesPage() {
       setProducts([]);
       setPurchases([]);
       setSupplierId("");
+      setCashAccounts([]);
       return;
     }
 
@@ -288,8 +296,9 @@ export function PurchasesPage() {
       invoke<Supplier[]>("supplier_list", { businessId }),
       invoke<PurchaseProduct[]>("purchase_product_list", { businessId }),
       invoke<Purchase[]>("purchase_list", { businessId }),
+      loadCashAccountPaymentOptions(businessId),
     ])
-      .then(([supplierResult, productResult, purchaseResult]) => {
+      .then(([supplierResult, productResult, purchaseResult, accountResult]) => {
         if (active) {
           const activeSuppliers = supplierResult.filter((supplier) => supplier.is_active);
           setSuppliers(activeSuppliers);
@@ -300,6 +309,7 @@ export function PurchasesPage() {
           );
           setProducts(productResult);
           setPurchases(purchaseResult);
+          setCashAccounts(accountResult);
         }
       })
       .catch((cause: unknown) => {
@@ -310,8 +320,10 @@ export function PurchasesPage() {
       .finally(() => {
         if (active) {
           setIsLoadingData(false);
+          setIsLoadingCashAccounts(false);
         }
       });
+    setIsLoadingCashAccounts(true);
     return () => {
       active = false;
     };
@@ -472,6 +484,15 @@ export function PurchasesPage() {
       setError(`Enter a valid payment up to ${formatMoney(purchase.balance_due)}.`);
       return;
     }
+    const paymentMethod = paymentMethods[purchase.id] ?? "cash";
+    const accounts = accountsForPaymentMethod(cashAccounts, paymentMethod);
+    const accountId = accounts.some((account) => account.id === paymentAccountIds[purchase.id])
+      ? paymentAccountIds[purchase.id]
+      : accounts[0]?.id;
+    if (!accountId) {
+      setError("Ask the Owner/Admin to set up an account and authorize its opening balance before paying this supplier.");
+      return;
+    }
 
     setError(null);
     setPayingPurchaseId(purchase.id);
@@ -480,10 +501,16 @@ export function PurchasesPage() {
         businessId,
         purchaseId: purchase.id,
         amount,
-        paymentMethod: paymentMethods[purchase.id] ?? "cash",
+        paymentMethod,
+        accountId,
       });
       setPurchases((current) => current.map((item) => item.id === purchase.id ? updated : item));
       setPaymentAmounts((current) => ({ ...current, [purchase.id]: "" }));
+      try {
+        setCashAccounts(await loadCashAccountPaymentOptions(businessId));
+      } catch (cause) {
+        setError(`Supplier payment was recorded, but account balances could not be refreshed. ${errorText(cause)}`);
+      }
     } catch (cause) {
       setError(`Could not record the supplier payment. ${errorText(cause)}`);
     } finally {
@@ -784,7 +811,7 @@ export function PurchasesPage() {
                     <CardContent className="space-y-4">
                       {purchase.balance_due > 0 ? (
                         <form
-                          className="grid gap-3 rounded-lg border p-4 md:grid-cols-[1fr_1fr_auto]"
+                          className="grid gap-3 rounded-lg border p-4 sm:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_auto]"
                           onSubmit={(event) => void handleRecordPayment(event, purchase)}
                         >
                           <div className="space-y-2">
@@ -807,17 +834,61 @@ export function PurchasesPage() {
                             <SelectField
                               id={`payment-method-${purchase.id}`}
                               value={paymentMethods[purchase.id] ?? "cash"}
-                              onChange={(event) => setPaymentMethods((current) => ({
-                                ...current,
-                                [purchase.id]: event.target.value as PaymentMethod,
-                              }))}
+                              onChange={(event) => {
+                                const method = PAYMENT_METHODS.find((item) => item.value === event.target.value)?.value;
+                                if (method) {
+                                  setPaymentMethods((current) => ({ ...current, [purchase.id]: method }));
+                                  setPaymentAccountIds((current) => ({
+                                    ...current,
+                                    [purchase.id]: accountsForPaymentMethod(cashAccounts, method)[0]?.id ?? "",
+                                  }));
+                                }
+                              }}
                             >
                               {PAYMENT_METHODS.map((method) => (
                                 <option key={method.value} value={method.value}>{method.label}</option>
                               ))}
                             </SelectField>
                           </div>
-                          <Button type="submit" className="self-end" disabled={payingPurchaseId !== null}>
+                          <div className="space-y-2">
+                            <Label htmlFor={`payment-account-${purchase.id}`}>Pay from account</Label>
+                            <SelectField
+                              id={`payment-account-${purchase.id}`}
+                              value={(() => {
+                                const options = accountsForPaymentMethod(
+                                  cashAccounts,
+                                  paymentMethods[purchase.id] ?? "cash",
+                                );
+                                return options.some((account) => account.id === paymentAccountIds[purchase.id])
+                                  ? paymentAccountIds[purchase.id]
+                                  : options[0]?.id ?? "";
+                              })()}
+                              disabled={isLoadingCashAccounts}
+                              onChange={(event) => setPaymentAccountIds((current) => ({
+                                ...current,
+                                [purchase.id]: event.target.value,
+                              }))}
+                            >
+                              <option value="">Select opened account</option>
+                              {accountsForPaymentMethod(
+                                cashAccounts,
+                                paymentMethods[purchase.id] ?? "cash",
+                              ).map((account) => (
+                                <option key={account.id} value={account.id}>
+                                  {account.name} · Available {formatMoney(account.availableBalance)}
+                                </option>
+                              ))}
+                            </SelectField>
+                            {accountsForPaymentMethod(
+                              cashAccounts,
+                              paymentMethods[purchase.id] ?? "cash",
+                            ).length === 0 ? (
+                              <p className="text-xs text-amber-700">
+                                An authorized opening balance is required before payment.
+                              </p>
+                            ) : null}
+                          </div>
+                          <Button type="submit" className="self-end" disabled={payingPurchaseId !== null || isLoadingCashAccounts}>
                             {payingPurchaseId === purchase.id
                               ? <LoaderCircle className="animate-spin" />
                               : <CreditCard />}

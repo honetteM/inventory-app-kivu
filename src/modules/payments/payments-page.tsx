@@ -9,13 +9,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/shared/page-header";
 import { SelectField } from "@/components/shared/select-field";
+import {
+  accountsForPaymentMethod,
+  loadCashAccountPaymentOptions,
+  type CashAccountPaymentOption,
+  type PaymentMethod,
+} from "@/modules/cash-accounts/cash-account-payment-options";
 
 interface Business {
   id: string;
   name: string;
 }
-
-type PaymentMethod = "cash" | "mtn_mobile_money" | "airtel_money" | "bank_transfer";
 
 const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
   { value: "cash", label: "Cash" },
@@ -75,11 +79,14 @@ export function PaymentsPage() {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessId, setBusinessId] = useState("");
   const [debts, setDebts] = useState<CustomerDebt[]>([]);
+  const [cashAccounts, setCashAccounts] = useState<CashAccountPaymentOption[]>([]);
   const [selectedDebtId, setSelectedDebtId] = useState("");
   const [amount, setAmount] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cash");
+  const [accountId, setAccountId] = useState("");
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
   const [isLoadingDebts, setIsLoadingDebts] = useState(false);
+  const [isLoadingCashAccounts, setIsLoadingCashAccounts] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -150,10 +157,47 @@ export function PaymentsPage() {
     };
   }, [businessId]);
 
+  useEffect(() => {
+    if (!businessId) {
+      setCashAccounts([]);
+      setAccountId("");
+      return;
+    }
+
+    let active = true;
+    setIsLoadingCashAccounts(true);
+    loadCashAccountPaymentOptions(businessId)
+      .then((result) => {
+        if (active) {
+          setCashAccounts(result);
+          setAccountId((current) =>
+            accountsForPaymentMethod(result, paymentMethod).some((account) => account.id === current)
+              ? current
+              : accountsForPaymentMethod(result, paymentMethod)[0]?.id ?? "",
+          );
+        }
+      })
+      .catch((cause: unknown) => {
+        if (active) {
+          setCashAccounts([]);
+          setError(`Could not load opened cash accounts. ${errorText(cause)}`);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsLoadingCashAccounts(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [businessId, paymentMethod]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const parsedAmount = parseMoney(amount);
-    if (!businessId || !selectedDebtId || parsedAmount === null || parsedAmount <= 0) {
+    if (!businessId || !selectedDebtId || !accountId || parsedAmount === null || parsedAmount <= 0) {
       setError("Select an outstanding customer debt and enter a valid repayment amount.");
       return;
     }
@@ -171,6 +215,7 @@ export function PaymentsPage() {
         debtId: selectedDebtId,
         paymentMethod,
         amount: parsedAmount,
+        accountId,
       });
       setDebts((current) =>
         current.map((debt) =>
@@ -187,6 +232,11 @@ export function PaymentsPage() {
       setNotice(
         `Recorded ${formatMoney(payment.amount)} from ${payment.customer_name}. Remaining balance: ${formatMoney(payment.balance_due)}.`,
       );
+      try {
+        setCashAccounts(await loadCashAccountPaymentOptions(businessId));
+      } catch (cause) {
+        setError(`Repayment was recorded, but account balances could not be refreshed. ${errorText(cause)}`);
+      }
       if (payment.balance_due === 0) {
         const nextOpenDebt = debts.find((debt) => debt.id !== payment.debt_id && debt.balance_due > 0);
         setSelectedDebtId(nextOpenDebt?.id ?? "");
@@ -320,6 +370,7 @@ export function PaymentsPage() {
                         const selected = PAYMENT_METHODS.find((method) => method.value === event.target.value);
                         if (selected) {
                           setPaymentMethod(selected.value);
+                          setAccountId(accountsForPaymentMethod(cashAccounts, selected.value)[0]?.id ?? "");
                         }
                       }}
                     >
@@ -328,9 +379,31 @@ export function PaymentsPage() {
                       ))}
                     </SelectField>
                   </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="repayment-cash-account">Money received into</Label>
+                    <SelectField
+                      id="repayment-cash-account"
+                      required
+                      value={accountId}
+                      disabled={isLoadingCashAccounts}
+                      onChange={(event) => setAccountId(event.target.value)}
+                    >
+                      <option value="">Select opened account</option>
+                      {accountsForPaymentMethod(cashAccounts, paymentMethod).map((account) => (
+                        <option key={account.id} value={account.id}>
+                          {account.name} · Available {formatMoney(account.availableBalance)}
+                        </option>
+                      ))}
+                    </SelectField>
+                    {accountsForPaymentMethod(cashAccounts, paymentMethod).length === 0 ? (
+                      <p className="text-xs text-amber-700">
+                        Ask the Owner/Admin to set up an account and authorize its opening balance.
+                      </p>
+                    ) : null}
+                  </div>
                   <Button
                     type="submit"
-                    disabled={isSaving || isLoadingDebts || !selectedDebt || selectedDebt.balance_due <= 0}
+                    disabled={isSaving || isLoadingDebts || isLoadingCashAccounts || !selectedDebt || selectedDebt.balance_due <= 0 || !accountId}
                   >
                     {isSaving ? <LoaderCircle className="animate-spin" /> : <Wallet />}
                     {isSaving ? "Recording..." : "Record repayment"}

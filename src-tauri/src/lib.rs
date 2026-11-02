@@ -241,6 +241,108 @@ fn cash_account_list(
 }
 
 #[tauri::command]
+fn cash_account_payment_options(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::CashAccountPaymentOption>, String> {
+    state
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_CASH_ACCOUNT_BALANCE_READ,
+            |conn, _| db::list_cash_account_payment_options(conn, &business_id),
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cash_account_opening_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    account_id: String,
+    opening_amount: i64,
+) -> Result<(), String> {
+    state
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_CASH_ACCOUNTS_MANAGE,
+            |conn, user| {
+                db::create_cash_account_opening(
+                    conn,
+                    &business_id,
+                    &account_id,
+                    opening_amount,
+                    user,
+                )
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cash_transfer_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    from_account_id: String,
+    to_account_id: String,
+    amount: i64,
+) -> Result<db::CashTransfer, String> {
+    state
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_CASH_ACCOUNTS_MANAGE,
+            |conn, user| {
+                db::create_cash_transfer(
+                    conn,
+                    &business_id,
+                    &from_account_id,
+                    &to_account_id,
+                    amount,
+                    user,
+                )
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cash_transfer_confirm(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    transfer_id: String,
+    confirmation_reference: Option<String>,
+) -> Result<(), String> {
+    state
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_CASH_ACCOUNTS_MANAGE,
+            |conn, user| {
+                db::confirm_cash_transfer(
+                    conn,
+                    &business_id,
+                    &transfer_id,
+                    confirmation_reference.as_deref(),
+                    user,
+                )
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cash_transfer_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::CashTransfer>, String> {
+    state
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_CASH_ACCOUNTS_MANAGE,
+            |conn, _| db::list_cash_transfers(conn, &business_id),
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn cash_account_create(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -549,11 +651,24 @@ fn purchase_record_payment(
     purchase_id: String,
     amount: i64,
     payment_method: String,
+    account_id: String,
 ) -> Result<db::Purchase, String> {
     state
-        .with_business_permission(&business_id, db::PERMISSION_PURCHASES_MANAGE, |conn, _| {
-            db::record_purchase_payment(conn, &business_id, &purchase_id, amount, &payment_method)
-        })
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_PURCHASES_MANAGE,
+            |conn, user| {
+                db::record_purchase_payment_as_user(
+                    conn,
+                    &business_id,
+                    &purchase_id,
+                    amount,
+                    &payment_method,
+                    &account_id,
+                    user,
+                )
+            },
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -619,13 +734,14 @@ fn pos_checkout(
     payments: Vec<db::SalePaymentInput>,
 ) -> Result<db::SaleReceipt, String> {
     state
-        .with_business_permission(&business_id, db::PERMISSION_SALES_MANAGE, |conn, _| {
-            db::checkout_sale_with_payments(
+        .with_business_permission(&business_id, db::PERMISSION_SALES_MANAGE, |conn, user| {
+            db::checkout_sale_with_payments_as_user(
                 conn,
                 &business_id,
                 &items,
                 customer_id.as_deref(),
                 &payments,
+                user,
             )
         })
         .map_err(|e| e.to_string())
@@ -719,18 +835,21 @@ fn customer_debt_record_payment(
     debt_id: String,
     payment_method: String,
     amount: i64,
+    account_id: String,
 ) -> Result<db::CustomerDebtPayment, String> {
     state
         .with_business_permission(
             &business_id,
             db::PERMISSION_CUSTOMER_PAYMENTS_MANAGE,
-            |conn, _| {
-                db::record_customer_debt_payment(
+            |conn, user| {
+                db::record_customer_debt_payment_as_user(
                     conn,
                     &business_id,
                     &debt_id,
                     &payment_method,
                     amount,
+                    &account_id,
+                    user,
                 )
             },
         )
@@ -954,6 +1073,11 @@ pub fn run() {
             business_create,
             cash_account_list,
             cash_account_create,
+            cash_account_payment_options,
+            cash_account_opening_create,
+            cash_transfer_create,
+            cash_transfer_confirm,
+            cash_transfer_list,
             cash_account_set_active,
             category_list,
             category_create,

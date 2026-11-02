@@ -91,6 +91,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "019_expense_and_balance_permissions",
         include_str!("../migrations/019_expense_and_balance_permissions.sql"),
     ),
+    (
+        20,
+        "020_opening_balances_and_cash_posting",
+        include_str!("../migrations/020_opening_balances_and_cash_posting.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -138,6 +143,7 @@ pub const PERMISSION_ROLES_MANAGE: &str = "roles.manage";
 const MANAGER_PERMISSION_IDS: &[&str] = &[
     PERMISSION_SYSTEM_READ,
     PERMISSION_BUSINESS_READ,
+    PERMISSION_CASH_ACCOUNT_BALANCE_READ,
     PERMISSION_CATALOG_READ,
     PERMISSION_CATALOG_MANAGE,
     PERMISSION_INVENTORY_READ,
@@ -158,6 +164,7 @@ const MANAGER_PERMISSION_IDS: &[&str] = &[
 const DEFAULT_MANAGER_PERMISSION_IDS: &[&str] = &[
     PERMISSION_SYSTEM_READ,
     PERMISSION_BUSINESS_READ,
+    PERMISSION_CASH_ACCOUNT_BALANCE_READ,
     PERMISSION_CATALOG_READ,
     PERMISSION_CATALOG_MANAGE,
     PERMISSION_INVENTORY_READ,
@@ -585,6 +592,28 @@ pub struct CashAccount {
     pub is_active: bool,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CashAccountPaymentOption {
+    pub id: String,
+    pub account_type: String,
+    pub name: String,
+    pub available_balance: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CashTransfer {
+    pub id: String,
+    pub from_account_id: String,
+    pub to_account_id: String,
+    pub amount: i64,
+    pub status: String,
+    pub confirmation_reference: Option<String>,
+    pub occurred_at: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1301,6 +1330,563 @@ pub fn list_cash_accounts(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(accounts)
+}
+
+pub fn cash_account_balance(
+    conn: &Connection,
+    business_id: &str,
+    account_id: &str,
+) -> Result<i64, DbError> {
+    let opening: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT opening_amount, recorded_at FROM cash_account_openings
+             WHERE business_id = ?1 AND account_id = ?2",
+            params![business_id, account_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (opening_amount, opened_at) = opening.ok_or_else(|| {
+        DbError::InvalidInput(
+            "this account has no authorized opening balance; ask the Owner/Admin to set one"
+                .to_string(),
+        )
+    })?;
+    let mut stmt = conn.prepare(
+        "SELECT direction, amount FROM cash_movements
+         WHERE business_id = ?1 AND account_id = ?2 AND recorded_at >= ?3
+         ORDER BY recorded_at, id",
+    )?;
+    let movements = stmt
+        .query_map(params![business_id, account_id, opened_at], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    movements
+        .into_iter()
+        .try_fold(opening_amount, |balance, (direction, amount)| {
+            let next = if direction == "in" {
+                balance.checked_add(amount)
+            } else {
+                balance.checked_sub(amount)
+            };
+            next.ok_or_else(|| {
+                DbError::InvalidInput(
+                    "cash account balance exceeds the supported range".to_string(),
+                )
+            })
+        })
+}
+
+pub fn list_cash_account_payment_options(
+    conn: &Connection,
+    business_id: &str,
+) -> Result<Vec<CashAccountPaymentOption>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.account_type, a.name
+         FROM cash_accounts a
+         JOIN cash_account_openings o
+           ON o.business_id = a.business_id AND o.account_id = a.id
+         WHERE a.business_id = ?1 AND a.is_active = 1
+         ORDER BY a.account_type, a.name COLLATE NOCASE",
+    )?;
+    let accounts = stmt
+        .query_map(params![business_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    accounts
+        .into_iter()
+        .map(|(id, account_type, name)| {
+            Ok(CashAccountPaymentOption {
+                available_balance: cash_account_balance(conn, business_id, &id)?,
+                id,
+                account_type,
+                name,
+            })
+        })
+        .collect()
+}
+
+pub fn create_cash_account_opening(
+    conn: &Connection,
+    business_id: &str,
+    account_id: &str,
+    opening_amount: i64,
+    actor: &AuthUser,
+) -> Result<(), DbError> {
+    if actor.role != "owner" || actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "only the Owner/Admin can authorize an account opening balance".to_string(),
+        ));
+    }
+    require_permission(conn, actor, PERMISSION_CASH_ACCOUNTS_MANAGE)?;
+    if opening_amount < 0 {
+        return Err(DbError::InvalidInput(
+            "opening balance cannot be negative".to_string(),
+        ));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let account_is_active: bool = tx
+        .query_row(
+            "SELECT is_active FROM cash_accounts WHERE id = ?1 AND business_id = ?2",
+            params![account_id, business_id],
+            |row| row.get::<_, i64>(0).map(|value| value != 0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            DbError::InvalidInput("cash account does not belong to this business".to_string())
+        })?;
+    if !account_is_active {
+        return Err(DbError::InvalidInput(
+            "activate the cash account before opening its balance".to_string(),
+        ));
+    }
+    let has_movement: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM cash_movements
+         WHERE business_id = ?1 AND account_id = ?2)",
+        params![business_id, account_id],
+        |row| row.get(0),
+    )?;
+    if has_movement {
+        return Err(DbError::InvalidInput(
+            "an account with existing movements cannot receive an opening balance; use an authorized correction".to_string(),
+        ));
+    }
+    let already_opened: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM cash_account_openings
+         WHERE business_id = ?1 AND account_id = ?2)",
+        params![business_id, account_id],
+        |row| row.get(0),
+    )?;
+    if already_opened {
+        return Err(DbError::InvalidInput(
+            "this account already has an authorized opening balance; use an authorized correction"
+                .to_string(),
+        ));
+    }
+
+    let timestamp = now_utc();
+    tx.execute(
+        "INSERT INTO cash_account_openings
+            (id, business_id, account_id, opening_amount, opened_at,
+             entered_by_user_id, authorized_by_user_id, recorded_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?5)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            account_id,
+            opening_amount,
+            timestamp,
+            actor.id
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'cash_account_opened', 'cash_account', ?4, ?5, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            actor.id,
+            account_id,
+            serde_json::json!({
+                "opening_amount": opening_amount,
+                "authorized_by": actor.id
+            })
+            .to_string(),
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn create_cash_transfer(
+    conn: &Connection,
+    business_id: &str,
+    from_account_id: &str,
+    to_account_id: &str,
+    amount: i64,
+    actor: &AuthUser,
+) -> Result<CashTransfer, DbError> {
+    if actor.role != "owner" || actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "only the Owner/Admin can authorize account transfers".to_string(),
+        ));
+    }
+    require_permission(conn, actor, PERMISSION_CASH_ACCOUNTS_MANAGE)?;
+    if from_account_id == to_account_id {
+        return Err(DbError::InvalidInput(
+            "select two different cash accounts".to_string(),
+        ));
+    }
+    if amount <= 0 {
+        return Err(DbError::InvalidInput(
+            "transfer amount must be greater than zero".to_string(),
+        ));
+    }
+    let tx = conn.unchecked_transaction()?;
+    for account_id in [from_account_id, to_account_id] {
+        let is_active: bool = tx
+            .query_row(
+                "SELECT is_active FROM cash_accounts
+                 WHERE business_id = ?1 AND id = ?2",
+                params![business_id, account_id],
+                |row| row.get::<_, i64>(0).map(|value| value != 0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                DbError::InvalidInput("cash account does not belong to this business".to_string())
+            })?;
+        if !is_active {
+            return Err(DbError::InvalidInput(
+                "both transfer accounts must be active".to_string(),
+            ));
+        }
+        cash_account_balance(&tx, business_id, account_id)?;
+    }
+    let available = cash_account_balance(&tx, business_id, from_account_id)?;
+    if amount > available {
+        return Err(DbError::InvalidInput(format!(
+            "transfer exceeds the available balance of {available} in the source account"
+        )));
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    tx.execute(
+        "INSERT INTO cash_transfers
+            (id, business_id, from_account_id, to_account_id, amount,
+             occurred_at, initiated_by_user_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6)",
+        params![
+            id,
+            business_id,
+            from_account_id,
+            to_account_id,
+            amount,
+            timestamp,
+            actor.id
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'cash_transfer_created', 'cash_transfer', ?4, ?5, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            actor.id,
+            id,
+            serde_json::json!({
+                "from_account_id": from_account_id,
+                "to_account_id": to_account_id,
+                "amount": amount
+            })
+            .to_string(),
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    Ok(CashTransfer {
+        id,
+        from_account_id: from_account_id.to_string(),
+        to_account_id: to_account_id.to_string(),
+        amount,
+        status: "pending".to_string(),
+        confirmation_reference: None,
+        occurred_at: timestamp.clone(),
+        created_at: timestamp,
+    })
+}
+
+pub fn confirm_cash_transfer(
+    conn: &Connection,
+    business_id: &str,
+    transfer_id: &str,
+    confirmation_reference: Option<&str>,
+    actor: &AuthUser,
+) -> Result<(), DbError> {
+    if actor.role != "owner" || actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "only the Owner/Admin can confirm account transfers".to_string(),
+        ));
+    }
+    require_permission(conn, actor, PERMISSION_CASH_ACCOUNTS_MANAGE)?;
+    let reference = confirmation_reference
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if reference.is_some_and(|value| value.chars().count() > 200) {
+        return Err(DbError::InvalidInput(
+            "transfer confirmation reference must be 200 characters or fewer".to_string(),
+        ));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let transfer: Option<(String, String, i64, String)> = tx
+        .query_row(
+            "SELECT from_account_id, to_account_id, amount, status
+             FROM cash_transfers WHERE id = ?1 AND business_id = ?2",
+            params![transfer_id, business_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let (from_account_id, to_account_id, amount, status) = transfer.ok_or_else(|| {
+        DbError::InvalidInput("cash transfer does not belong to this business".to_string())
+    })?;
+    if status != "pending" {
+        return Err(DbError::InvalidInput(
+            "only a pending transfer can be confirmed".to_string(),
+        ));
+    }
+    for account_id in [&from_account_id, &to_account_id] {
+        let is_active: bool = tx.query_row(
+            "SELECT is_active FROM cash_accounts
+             WHERE business_id = ?1 AND id = ?2",
+            params![business_id, account_id],
+            |row| row.get::<_, i64>(0).map(|value| value != 0),
+        )?;
+        if !is_active {
+            return Err(DbError::InvalidInput(
+                "both transfer accounts must be active when the transfer is confirmed".to_string(),
+            ));
+        }
+    }
+    let available = cash_account_balance(&tx, business_id, &from_account_id)?;
+    if amount > available {
+        return Err(DbError::InvalidInput(format!(
+            "transfer exceeds the available balance of {available} in the source account"
+        )));
+    }
+    let timestamp = now_utc();
+    let updated = tx.execute(
+        "UPDATE cash_transfers
+         SET status = 'confirmed', confirmed_by_user_id = ?1, confirmed_at = ?2,
+             confirmation_reference = ?3
+         WHERE id = ?4 AND business_id = ?5 AND status = 'pending'",
+        params![actor.id, timestamp, reference, transfer_id, business_id],
+    )?;
+    if updated != 1 {
+        return Err(DbError::InvalidInput(
+            "cash transfer changed before it could be confirmed".to_string(),
+        ));
+    }
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'cash_transfer_confirmed', 'cash_transfer', ?4, ?5, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            actor.id,
+            transfer_id,
+            serde_json::json!({
+                "from_account_id": from_account_id,
+                "to_account_id": to_account_id,
+                "amount": amount,
+                "confirmation_reference": reference
+            })
+            .to_string(),
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn list_cash_transfers(
+    conn: &Connection,
+    business_id: &str,
+) -> Result<Vec<CashTransfer>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, from_account_id, to_account_id, amount, status,
+                confirmation_reference, occurred_at, created_at
+         FROM cash_transfers
+         WHERE business_id = ?1
+         ORDER BY created_at DESC, id DESC
+         LIMIT 100",
+    )?;
+    let transfers = stmt
+        .query_map(params![business_id], |row| {
+            Ok(CashTransfer {
+                id: row.get(0)?,
+                from_account_id: row.get(1)?,
+                to_account_id: row.get(2)?,
+                amount: row.get(3)?,
+                status: row.get(4)?,
+                confirmation_reference: row.get(5)?,
+                occurred_at: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(transfers)
+}
+
+fn expected_account_type(payment_method: &str) -> Option<&'static str> {
+    match payment_method {
+        "cash" => Some("cash_drawer"),
+        "bank_transfer" => Some("bank"),
+        "mtn_mobile_money" => Some("mtn_wallet"),
+        "airtel_money" => Some("airtel_wallet"),
+        _ => None,
+    }
+}
+
+fn validate_payment_account(
+    conn: &Connection,
+    business_id: &str,
+    account_id: &str,
+    payment_method: &str,
+) -> Result<i64, DbError> {
+    let expected_type = expected_account_type(payment_method)
+        .ok_or_else(|| DbError::InvalidInput("select a supported payment method".to_string()))?;
+    let account_type: Option<(String, bool)> = conn
+        .query_row(
+            "SELECT account_type, is_active FROM cash_accounts
+             WHERE business_id = ?1 AND id = ?2",
+            params![business_id, account_id],
+            |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+        )
+        .optional()?;
+    let (account_type, active) = account_type.ok_or_else(|| {
+        DbError::InvalidInput("select a cash account belonging to this business".to_string())
+    })?;
+    if account_type != expected_type {
+        return Err(DbError::InvalidInput(
+            "selected cash account does not match the payment method".to_string(),
+        ));
+    }
+    if !active {
+        return Err(DbError::InvalidInput(
+            "selected cash account is inactive".to_string(),
+        ));
+    }
+    cash_account_balance(conn, business_id, account_id)
+}
+
+fn insert_cash_movement(
+    conn: &Connection,
+    business_id: &str,
+    account_id: &str,
+    movement_type: &str,
+    direction: &str,
+    amount: i64,
+    source_type: &str,
+    source_id: &str,
+    responsible_user_id: &str,
+    timestamp: &str,
+) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO cash_movements
+            (id, business_id, account_id, movement_type, direction, amount,
+             source_type, source_id, source_leg, responsible_user_id,
+             occurred_at, recorded_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'single', ?9, ?10, ?10)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            account_id,
+            movement_type,
+            direction,
+            amount,
+            source_type,
+            source_id,
+            responsible_user_id,
+            timestamp
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn test_payment_account(
+    conn: &Connection,
+    business_id: &str,
+    payment_method: &str,
+) -> Result<(String, AuthUser), DbError> {
+    let account_type = expected_account_type(payment_method)
+        .ok_or_else(|| DbError::InvalidInput("select a supported payment method".to_string()))?;
+    let actor: Option<AuthUser> = conn
+        .query_row(
+            "SELECT u.id, u.business_id, u.username, u.full_name, r.name
+             FROM users u
+             JOIN user_roles ur ON ur.user_id = u.id
+             JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
+             WHERE u.business_id = ?1
+             ORDER BY CASE r.name WHEN 'owner' THEN 0 ELSE 1 END, u.created_at
+             LIMIT 1",
+            params![business_id],
+            |row| {
+                Ok(AuthUser {
+                    id: row.get(0)?,
+                    business_id: row.get(1)?,
+                    username: row.get(2)?,
+                    full_name: row.get(3)?,
+                    role: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    let actor = match actor {
+        Some(actor) => actor,
+        None => bootstrap_owner(
+            conn,
+            Some(business_id),
+            None,
+            "test.owner",
+            "Test Owner",
+            "test-password-hash",
+        )?,
+    };
+    let account: Option<String> = conn
+        .query_row(
+            "SELECT id FROM cash_accounts
+             WHERE business_id = ?1 AND account_type = ?2 AND is_active = 1
+             ORDER BY created_at LIMIT 1",
+            params![business_id, account_type],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let account_id = if let Some(account_id) = account {
+        account_id
+    } else {
+        create_cash_account(
+            conn,
+            business_id,
+            &actor,
+            account_type,
+            &format!("Test {account_type}"),
+        )?
+        .id
+    };
+    let has_opening: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM cash_account_openings
+         WHERE business_id = ?1 AND account_id = ?2)",
+        params![business_id, account_id],
+        |row| row.get(0),
+    )?;
+    if !has_opening {
+        let timestamp = now_utc();
+        conn.execute(
+            "INSERT INTO cash_account_openings
+                (id, business_id, account_id, opening_amount, opened_at,
+                 entered_by_user_id, authorized_by_user_id, recorded_at)
+             VALUES (?1, ?2, ?3, 1000000000, ?4, ?5, ?5, ?4)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                business_id,
+                account_id,
+                timestamp,
+                actor.id
+            ],
+        )?;
+    }
+    Ok((account_id, actor))
 }
 
 pub fn create_cash_account(
@@ -2756,13 +3342,20 @@ pub fn list_customer_debts(
         .collect()
 }
 
-pub fn record_customer_debt_payment(
+pub fn record_customer_debt_payment_as_user(
     conn: &Connection,
     business_id: &str,
     debt_id: &str,
     payment_method: &str,
     amount: i64,
+    account_id: &str,
+    actor: &AuthUser,
 ) -> Result<CustomerDebtPayment, DbError> {
+    if actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "you are not signed in to this business".to_string(),
+        ));
+    }
     if !valid_sale_payment_method(payment_method) {
         return Err(DbError::InvalidInput(
             "select a supported payment method".to_string(),
@@ -2775,6 +3368,7 @@ pub fn record_customer_debt_payment(
     }
 
     let tx = conn.unchecked_transaction()?;
+    validate_payment_account(&tx, business_id, account_id, payment_method)?;
     let debt = load_customer_debt(&tx, business_id, debt_id)?;
     if amount > debt.balance_due {
         return Err(DbError::InvalidInput(
@@ -2785,9 +3379,29 @@ pub fn record_customer_debt_payment(
     let timestamp = now_utc();
     tx.execute(
         "INSERT INTO customer_debt_payments
-            (id, business_id, debt_id, payment_method, amount, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![id, business_id, debt_id, payment_method, amount, timestamp],
+            (id, business_id, debt_id, payment_method, amount, created_at, cash_account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id,
+            business_id,
+            debt_id,
+            payment_method,
+            amount,
+            timestamp,
+            account_id
+        ],
+    )?;
+    insert_cash_movement(
+        &tx,
+        business_id,
+        account_id,
+        "customer_repayment",
+        "in",
+        amount,
+        "customer_debt_payment",
+        &id,
+        &actor.id,
+        &timestamp,
     )?;
     tx.commit()?;
 
@@ -2800,6 +3414,26 @@ pub fn record_customer_debt_payment(
         balance_due: debt.balance_due - amount,
         created_at: timestamp,
     })
+}
+
+#[cfg(test)]
+pub fn record_customer_debt_payment(
+    conn: &Connection,
+    business_id: &str,
+    debt_id: &str,
+    payment_method: &str,
+    amount: i64,
+) -> Result<CustomerDebtPayment, DbError> {
+    let (account_id, actor) = test_payment_account(conn, business_id, payment_method)?;
+    record_customer_debt_payment_as_user(
+        conn,
+        business_id,
+        debt_id,
+        payment_method,
+        amount,
+        &account_id,
+        &actor,
+    )
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2948,12 +3582,14 @@ pub struct SaleReceiptItem {
 pub struct SalePaymentInput {
     pub payment_method: String,
     pub amount: i64,
+    pub account_id: String,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub struct SalePaymentReceipt {
     pub payment_method: String,
     pub amount: i64,
+    pub account_id: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -2999,9 +3635,40 @@ pub fn checkout_sale(
             "select a supported payment method".to_string(),
         ));
     }
-    checkout_sale_core(conn, business_id, items, None, &[], Some(payment_method))
+    let (account_id, actor) = test_payment_account(conn, business_id, payment_method)?;
+    checkout_sale_core(
+        conn,
+        business_id,
+        items,
+        None,
+        &[],
+        Some(payment_method),
+        Some(&account_id),
+        &actor,
+    )
 }
 
+pub fn checkout_sale_with_payments_as_user(
+    conn: &Connection,
+    business_id: &str,
+    items: &[SaleItemInput],
+    customer_id: Option<&str>,
+    payments: &[SalePaymentInput],
+    actor: &AuthUser,
+) -> Result<SaleReceipt, DbError> {
+    checkout_sale_core(
+        conn,
+        business_id,
+        items,
+        customer_id,
+        payments,
+        None,
+        None,
+        actor,
+    )
+}
+
+#[cfg(test)]
 pub fn checkout_sale_with_payments(
     conn: &Connection,
     business_id: &str,
@@ -3009,7 +3676,26 @@ pub fn checkout_sale_with_payments(
     customer_id: Option<&str>,
     payments: &[SalePaymentInput],
 ) -> Result<SaleReceipt, DbError> {
-    checkout_sale_core(conn, business_id, items, customer_id, payments, None)
+    let (_, actor) = test_payment_account(conn, business_id, "cash")?;
+    let payments_with_accounts = payments
+        .iter()
+        .map(|payment| {
+            let (account_id, _) = test_payment_account(conn, business_id, &payment.payment_method)?;
+            Ok(SalePaymentInput {
+                payment_method: payment.payment_method.clone(),
+                amount: payment.amount,
+                account_id,
+            })
+        })
+        .collect::<Result<Vec<_>, DbError>>()?;
+    checkout_sale_with_payments_as_user(
+        conn,
+        business_id,
+        items,
+        customer_id,
+        &payments_with_accounts,
+        &actor,
+    )
 }
 
 fn checkout_sale_core(
@@ -3019,7 +3705,14 @@ fn checkout_sale_core(
     customer_id: Option<&str>,
     payment_inputs: &[SalePaymentInput],
     default_payment_method: Option<&str>,
+    default_cash_account_id: Option<&str>,
+    actor: &AuthUser,
 ) -> Result<SaleReceipt, DbError> {
+    if actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "you are not signed in to this business".to_string(),
+        ));
+    }
     if items.is_empty() || items.len() > 100 {
         return Err(DbError::InvalidInput(
             "a sale must contain between 1 and 100 products".to_string(),
@@ -3181,6 +3874,11 @@ fn checkout_sale_core(
         vec![SalePaymentReceipt {
             payment_method: method.to_string(),
             amount: total,
+            account_id: default_cash_account_id
+                .ok_or_else(|| {
+                    DbError::InvalidInput("select an opened cash account for the sale".to_string())
+                })?
+                .to_string(),
         }]
     } else {
         let mut payments = Vec::with_capacity(payment_inputs.len());
@@ -3198,6 +3896,7 @@ fn checkout_sale_core(
             payments.push(SalePaymentReceipt {
                 payment_method: payment.payment_method.clone(),
                 amount: payment.amount,
+                account_id: payment.account_id.clone(),
             });
         }
         payments
@@ -3213,6 +3912,14 @@ fn checkout_sale_core(
         .ok_or_else(|| {
             DbError::InvalidInput("payments cannot exceed the sale total".to_string())
         })?;
+    for payment in &payments {
+        validate_payment_account(
+            &tx,
+            business_id,
+            &payment.account_id,
+            &payment.payment_method,
+        )?;
+    }
 
     let customer_name = if let Some(customer_id) = customer_id {
         let customer: Option<(String, i64)> = tx
@@ -3337,16 +4044,31 @@ fn checkout_sale_core(
         });
     }
     for payment in &payments {
+        let payment_id = uuid::Uuid::new_v4().to_string();
         tx.execute(
-            "INSERT INTO sale_payments (id, sale_id, payment_method, amount, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO sale_payments
+                (id, sale_id, payment_method, amount, created_at, cash_account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
-                uuid::Uuid::new_v4().to_string(),
+                payment_id,
                 sale_id,
                 payment.payment_method,
                 payment.amount,
-                timestamp
+                timestamp,
+                payment.account_id
             ],
+        )?;
+        insert_cash_movement(
+            &tx,
+            business_id,
+            &payment.account_id,
+            "sale_collection",
+            "in",
+            payment.amount,
+            "sale_payment",
+            &payment_id,
+            &actor.id,
+            &timestamp,
         )?;
     }
     if balance_due > 0 {
@@ -3639,13 +4361,20 @@ pub fn list_purchases(conn: &Connection, business_id: &str) -> Result<Vec<Purcha
         .collect()
 }
 
-pub fn record_purchase_payment(
+pub fn record_purchase_payment_as_user(
     conn: &Connection,
     business_id: &str,
     purchase_id: &str,
     amount: i64,
     payment_method: &str,
+    account_id: &str,
+    actor: &AuthUser,
 ) -> Result<Purchase, DbError> {
+    if actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "you are not signed in to this business".to_string(),
+        ));
+    }
     if amount <= 0 {
         return Err(DbError::InvalidInput(
             "payment amount must be greater than zero".to_string(),
@@ -3661,6 +4390,12 @@ pub fn record_purchase_payment(
     }
 
     let tx = conn.unchecked_transaction()?;
+    let available_balance = validate_payment_account(&tx, business_id, account_id, payment_method)?;
+    if amount > available_balance {
+        return Err(DbError::InvalidInput(format!(
+            "payment exceeds the available balance of {available_balance} in the selected account"
+        )));
+    }
     let subtotal = tx
         .query_row(
             "SELECT subtotal FROM purchases WHERE id = ?1 AND business_id = ?2",
@@ -3685,21 +4420,56 @@ pub fn record_purchase_payment(
             "payment exceeds the outstanding balance of {balance_due}"
         )));
     }
+    let payment_id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
     tx.execute(
         "INSERT INTO purchase_payments
-            (id, business_id, purchase_id, payment_method, amount, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (id, business_id, purchase_id, payment_method, amount, created_at, cash_account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
-            uuid::Uuid::new_v4().to_string(),
+            payment_id,
             business_id,
             purchase_id,
             payment_method,
             amount,
-            now_utc()
+            timestamp,
+            account_id
         ],
+    )?;
+    insert_cash_movement(
+        &tx,
+        business_id,
+        account_id,
+        "supplier_payment",
+        "out",
+        amount,
+        "purchase_payment",
+        &payment_id,
+        &actor.id,
+        &timestamp,
     )?;
     tx.commit()?;
     load_purchase(conn, business_id, purchase_id)
+}
+
+#[cfg(test)]
+pub fn record_purchase_payment(
+    conn: &Connection,
+    business_id: &str,
+    purchase_id: &str,
+    amount: i64,
+    payment_method: &str,
+) -> Result<Purchase, DbError> {
+    let (account_id, actor) = test_payment_account(conn, business_id, payment_method)?;
+    record_purchase_payment_as_user(
+        conn,
+        business_id,
+        purchase_id,
+        amount,
+        payment_method,
+        &account_id,
+        &actor,
+    )
 }
 
 pub fn create_purchase(
@@ -5813,10 +6583,7 @@ mod tests {
             require_permission(&conn, &manager, PERMISSION_EXPENSES_MANAGE),
             Err(DbError::InvalidInput(_))
         ));
-        assert!(matches!(
-            require_permission(&conn, &manager, PERMISSION_CASH_ACCOUNT_BALANCE_READ),
-            Err(DbError::InvalidInput(_))
-        ));
+        require_permission(&conn, &manager, PERMISSION_CASH_ACCOUNT_BALANCE_READ).unwrap();
         assert!(
             list_manager_permissions(&conn, &business.id)
                 .unwrap()
@@ -5824,8 +6591,13 @@ mod tests {
                 .all(|setting| {
                     setting.permission_id != PERMISSION_EXPENSES_READ
                         && setting.permission_id != PERMISSION_EXPENSES_MANAGE
-                        && setting.permission_id != PERMISSION_CASH_ACCOUNT_BALANCE_READ
                 })
+        );
+        assert!(
+            list_manager_permissions(&conn, &business.id)
+                .unwrap()
+                .iter()
+                .any(|setting| setting.permission_id == PERMISSION_CASH_ACCOUNT_BALANCE_READ)
         );
         let cashier_permissions: i64 = conn
             .query_row(
@@ -6284,7 +7056,7 @@ mod tests {
         assert!(!permissions.contains(&"finance.read".to_string()));
         assert!(!permissions.contains(&PERMISSION_EXPENSES_READ.to_string()));
         assert!(!permissions.contains(&PERMISSION_EXPENSES_MANAGE.to_string()));
-        assert!(!permissions.contains(&PERMISSION_CASH_ACCOUNT_BALANCE_READ.to_string()));
+        assert!(permissions.contains(&PERMISSION_CASH_ACCOUNT_BALANCE_READ.to_string()));
         state
             .with_authorized(PERMISSION_CATALOG_MANAGE, |_, _| Ok(()))
             .unwrap();
@@ -6429,6 +7201,172 @@ mod tests {
     }
 
     #[test]
+    fn cash_account_opening_is_owner_authorized_immutable_and_drives_available_balance() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let owner = bootstrap_owner(
+            &conn,
+            Some(&business.id),
+            None,
+            "owner",
+            "Aline Uwase",
+            "$argon2id$owner-hash",
+        )
+        .unwrap();
+        let manager = create_employee(
+            &conn,
+            &business.id,
+            &owner,
+            "manager.one",
+            "Manager One",
+            "manager",
+            "$argon2id$manager-hash",
+        )
+        .unwrap();
+        let manager = AuthUser {
+            id: manager.id,
+            business_id: manager.business_id,
+            username: manager.username,
+            full_name: manager.full_name,
+            role: manager.role,
+        };
+        let account =
+            create_cash_account(&conn, &business.id, &owner, "cash_drawer", "Main drawer").unwrap();
+
+        assert!(cash_account_balance(&conn, &business.id, &account.id).is_err());
+        assert!(
+            create_cash_account_opening(&conn, &business.id, &account.id, 10_000, &manager)
+                .is_err()
+        );
+        create_cash_account_opening(&conn, &business.id, &account.id, 10_000, &owner).unwrap();
+        assert!(create_cash_account_opening(&conn, &business.id, &account.id, 1, &owner).is_err());
+        assert_eq!(
+            cash_account_balance(&conn, &business.id, &account.id).unwrap(),
+            10_000
+        );
+
+        let timestamp = now_utc();
+        insert_cash_movement(
+            &conn,
+            &business.id,
+            &account.id,
+            "other_receipt",
+            "in",
+            1_500,
+            "other",
+            &uuid::Uuid::new_v4().to_string(),
+            &owner.id,
+            &timestamp,
+        )
+        .unwrap();
+        assert_eq!(
+            cash_account_balance(&conn, &business.id, &account.id).unwrap(),
+            11_500
+        );
+        assert!(
+            conn.execute(
+                "UPDATE cash_account_openings SET opening_amount = 1
+                 WHERE business_id = ?1 AND account_id = ?2",
+                params![business.id, account.id],
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                "DELETE FROM cash_account_openings
+                 WHERE business_id = ?1 AND account_id = ?2",
+                params![business.id, account.id],
+            )
+            .is_err()
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM audit_logs
+                 WHERE business_id = ?1 AND action = 'cash_account_opened'",
+                params![business.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn cash_transfers_require_funds_and_post_both_legs_atomically() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let owner = bootstrap_owner(
+            &conn,
+            Some(&business.id),
+            None,
+            "owner",
+            "Aline Uwase",
+            "$argon2id$owner-hash",
+        )
+        .unwrap();
+        let cash =
+            create_cash_account(&conn, &business.id, &owner, "cash_drawer", "Main drawer").unwrap();
+        let bank =
+            create_cash_account(&conn, &business.id, &owner, "bank", "Business bank").unwrap();
+        create_cash_account_opening(&conn, &business.id, &cash.id, 25_000, &owner).unwrap();
+        create_cash_account_opening(&conn, &business.id, &bank.id, 0, &owner).unwrap();
+
+        let transfer =
+            create_cash_transfer(&conn, &business.id, &cash.id, &bank.id, 20_000, &owner).unwrap();
+        assert_eq!(transfer.status, "pending");
+        assert_eq!(
+            cash_account_balance(&conn, &business.id, &cash.id).unwrap(),
+            25_000
+        );
+        assert!(
+            create_cash_transfer(&conn, &business.id, &cash.id, &bank.id, 26_000, &owner).is_err()
+        );
+
+        confirm_cash_transfer(
+            &conn,
+            &business.id,
+            &transfer.id,
+            Some("BANK-REF-01"),
+            &owner,
+        )
+        .unwrap();
+        assert_eq!(
+            cash_account_balance(&conn, &business.id, &cash.id).unwrap(),
+            5_000
+        );
+        assert_eq!(
+            cash_account_balance(&conn, &business.id, &bank.id).unwrap(),
+            20_000
+        );
+        let stored = list_cash_transfers(&conn, &business.id).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].status, "confirmed");
+        assert_eq!(
+            stored[0].confirmation_reference.as_deref(),
+            Some("BANK-REF-01")
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cash_movements WHERE transfer_id = ?1",
+                params![transfer.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2
+        );
+        assert!(confirm_cash_transfer(&conn, &business.id, &transfer.id, None, &owner).is_err());
+
+        let pending =
+            create_cash_transfer(&conn, &business.id, &cash.id, &bank.id, 1_000, &owner).unwrap();
+        set_cash_account_active(&conn, &business.id, &bank.id, false, &owner).unwrap();
+        assert!(confirm_cash_transfer(&conn, &business.id, &pending.id, None, &owner).is_err());
+        assert_eq!(
+            cash_account_balance(&conn, &business.id, &cash.id).unwrap(),
+            5_000
+        );
+    }
+
+    #[test]
     fn cash_accounts_and_movements_enforce_custody_and_prevent_duplicate_postings() {
         let conn = open_in_memory().unwrap();
         let business = create_business(&conn, "Hardware shop", None).unwrap();
@@ -6467,6 +7405,22 @@ mod tests {
             params![bank_account_id, business.id, branch_id, timestamp],
         )
         .unwrap();
+        for account_id in [&cash_account_id, &bank_account_id] {
+            conn.execute(
+                "INSERT INTO cash_account_openings
+                    (id, business_id, account_id, opening_amount, opened_at,
+                     entered_by_user_id, authorized_by_user_id, recorded_at)
+                 VALUES (?1, ?2, ?3, 100000, ?4, ?5, ?5, ?4)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    business.id,
+                    account_id,
+                    timestamp,
+                    user_id
+                ],
+            )
+            .unwrap();
+        }
 
         let movement_id = uuid::Uuid::new_v4().to_string();
         let source_id = uuid::Uuid::new_v4().to_string();
@@ -6474,8 +7428,8 @@ mod tests {
             "INSERT INTO cash_movements
                 (id, business_id, account_id, movement_type, direction, amount,
                  source_type, source_id, responsible_user_id, occurred_at, recorded_at)
-             VALUES (?1, ?2, ?3, 'sale_collection', 'in', 10_000,
-                     'sale_payment', ?4, ?5, ?6, ?6)",
+             VALUES (?1, ?2, ?3, 'other_receipt', 'in', 10_000,
+                     'other', ?4, ?5, ?6, ?6)",
             params![
                 movement_id,
                 business.id,
@@ -6492,8 +7446,8 @@ mod tests {
                 "INSERT INTO cash_movements
                     (id, business_id, account_id, movement_type, direction, amount,
                      source_type, source_id, responsible_user_id, occurred_at, recorded_at)
-                 VALUES (?1, ?2, ?3, 'sale_collection', 'in', 10_000,
-                         'sale_payment', ?4, ?5, ?6, ?6)",
+                 VALUES (?1, ?2, ?3, 'other_receipt', 'in', 10_000,
+                         'other', ?4, ?5, ?6, ?6)",
                 params![
                     uuid::Uuid::new_v4().to_string(),
                     business.id,
@@ -6589,6 +7543,26 @@ mod tests {
                     name,
                     responsible_user_id,
                     timestamp
+                ],
+            )
+            .unwrap();
+        }
+        for (account_id, opening_amount, user_id) in [
+            (&from_account, 100_000_i64, &initiator_id),
+            (&to_account, 0_i64, &initiator_id),
+        ] {
+            conn.execute(
+                "INSERT INTO cash_account_openings
+                    (id, business_id, account_id, opening_amount, opened_at,
+                     entered_by_user_id, authorized_by_user_id, recorded_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?5)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    business.id,
+                    account_id,
+                    opening_amount,
+                    timestamp,
+                    user_id
                 ],
             )
             .unwrap();
@@ -7672,6 +8646,7 @@ mod tests {
             &[SalePaymentInput {
                 payment_method: "cash".to_string(),
                 amount: 5_000,
+                account_id: String::new(),
             }],
         )
         .unwrap();
@@ -8000,10 +8975,12 @@ mod tests {
                 SalePaymentInput {
                     payment_method: "cash".to_string(),
                     amount: 3_000,
+                    account_id: String::new(),
                 },
                 SalePaymentInput {
                     payment_method: "mtn_mobile_money".to_string(),
                     amount: 2_000,
+                    account_id: String::new(),
                 },
             ],
         )
@@ -8041,6 +9018,17 @@ mod tests {
             list_customers(&conn, &business.id).unwrap()[0].outstanding_balance,
             0
         );
+        let (cash_movement_count, cash_inflow_total): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(amount), 0)
+                 FROM cash_movements
+                 WHERE business_id = ?1 AND direction = 'in'",
+                params![business.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cash_movement_count, 4);
+        assert_eq!(cash_inflow_total, 15_000);
         let sales_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM sales", [], |row| row.get(0))
             .unwrap();
@@ -8078,6 +9066,7 @@ mod tests {
             &[SalePaymentInput {
                 payment_method: "cash".to_string(),
                 amount: 5_000,
+                account_id: String::new(),
             }],
         )
         .unwrap();
@@ -8957,11 +9946,98 @@ mod tests {
         assert_eq!(paid.balance_due, 0);
         assert_eq!(paid.payments.len(), 2);
         assert_eq!(paid.status, "pending");
+        let (movement_count, supplier_outflow_total): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(amount), 0)
+                 FROM cash_movements
+                 WHERE business_id = ?1 AND source_type = 'purchase_payment'",
+                params![business.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(movement_count, 2);
+        assert_eq!(supplier_outflow_total, 100_000);
         assert_eq!(
             list_inventory(&conn, &business.id, Some("SUPPLIER-PAYMENT-01"), 0, 20)
                 .unwrap()
                 .items[0]
                 .quantity_on_hand,
+            0
+        );
+    }
+
+    #[test]
+    fn supplier_payment_cannot_spend_more_than_the_verified_account_balance() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let owner = bootstrap_owner(
+            &conn,
+            Some(&business.id),
+            None,
+            "owner",
+            "Aline Uwase",
+            "$argon2id$owner-hash",
+        )
+        .unwrap();
+        let supplier = create_supplier(
+            &conn,
+            &business.id,
+            "Kigali Building Supplies",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let product = create_test_product(&conn, &business.id, "SUPPLIER-FUNDS-01");
+        let purchase = create_purchase(
+            &conn,
+            &business.id,
+            &supplier.id,
+            "INV-FUNDS-01",
+            &[PurchaseItemInput {
+                product_id: product.id,
+                ordered_quantity: 1_000,
+                unit_cost: 100_000,
+            }],
+            false,
+        )
+        .unwrap();
+        let account =
+            create_cash_account(&conn, &business.id, &owner, "cash_drawer", "Main drawer").unwrap();
+        create_cash_account_opening(&conn, &business.id, &account.id, 50_000, &owner).unwrap();
+
+        assert!(
+            record_purchase_payment_as_user(
+                &conn,
+                &business.id,
+                &purchase.id,
+                60_000,
+                "cash",
+                &account.id,
+                &owner,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            load_purchase(&conn, &business.id, &purchase.id)
+                .unwrap()
+                .amount_paid,
+            0
+        );
+        assert_eq!(
+            cash_account_balance(&conn, &business.id, &account.id).unwrap(),
+            50_000
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM cash_movements
+                 WHERE business_id = ?1 AND source_type = 'purchase_payment'",
+                params![business.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
             0
         );
     }

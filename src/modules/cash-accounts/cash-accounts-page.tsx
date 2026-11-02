@@ -25,6 +25,24 @@ interface CashAccount {
   updated_at: string;
 }
 
+interface CashAccountPaymentOption {
+  id: string;
+  accountType: AccountType;
+  name: string;
+  availableBalance: number;
+}
+
+interface CashTransfer {
+  id: string;
+  fromAccountId: string;
+  toAccountId: string;
+  amount: number;
+  status: "pending" | "confirmed" | "cancelled";
+  confirmationReference: string | null;
+  occurredAt: string;
+  createdAt: string;
+}
+
 const ACCOUNT_TYPES: { value: AccountType; label: string }[] = [
   { value: "cash_drawer", label: "Cash drawer" },
   { value: "bank", label: "Bank account" },
@@ -41,24 +59,61 @@ function accountTypeLabel(type: AccountType): string {
   return ACCOUNT_TYPES.find((accountType) => accountType.value === type)?.label ?? type;
 }
 
+function parseMoney(value: string): number | null {
+  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(value.trim());
+  if (!match || value.length > 17) {
+    return null;
+  }
+  const amount = BigInt(match[1]) * 100n + BigInt((match[2] ?? "").padEnd(2, "0"));
+  return amount <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(amount) : null;
+}
+
+function formatMoney(scaledAmount: number): string {
+  if (!Number.isSafeInteger(scaledAmount) || scaledAmount < 0) {
+    return "Invalid amount";
+  }
+  const amount = BigInt(scaledAmount);
+  const whole = amount / 100n;
+  const fraction = amount % 100n;
+  return `${new Intl.NumberFormat("en-RW").format(Number(whole))}${
+    fraction === 0n ? "" : `.${fraction.toString().padStart(2, "0")}`
+  } RWF`;
+}
+
 export function CashAccountsPage() {
   const { user } = useAuthentication();
   const [accounts, setAccounts] = useState<CashAccount[]>([]);
+  const [paymentOptions, setPaymentOptions] = useState<CashAccountPaymentOption[]>([]);
+  const [transfers, setTransfers] = useState<CashTransfer[]>([]);
   const [accountType, setAccountType] = useState<AccountType>("cash_drawer");
   const [name, setName] = useState("");
+  const [openingAmounts, setOpeningAmounts] = useState<Record<string, string>>({});
+  const [fromAccountId, setFromAccountId] = useState("");
+  const [toAccountId, setToAccountId] = useState("");
+  const [transferAmount, setTransferAmount] = useState("");
+  const [confirmationReferences, setConfirmationReferences] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [savingAccountId, setSavingAccountId] = useState<string | null>(null);
+  const [openingAccountId, setOpeningAccountId] = useState<string | null>(null);
+  const [isSavingTransfer, setIsSavingTransfer] = useState(false);
+  const [confirmingTransferId, setConfirmingTransferId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const showResponsibleUser = accountType === "cash_drawer";
 
   useEffect(() => {
     let active = true;
-    invoke<CashAccount[]>("cash_account_list", { businessId: user.business_id })
-      .then((result) => {
+    Promise.all([
+      invoke<CashAccount[]>("cash_account_list", { businessId: user.business_id }),
+      invoke<CashAccountPaymentOption[]>("cash_account_payment_options", { businessId: user.business_id }),
+      invoke<CashTransfer[]>("cash_transfer_list", { businessId: user.business_id }),
+    ])
+      .then(([result, balances, transferResult]) => {
         if (active) {
           setAccounts(result);
+          setPaymentOptions(balances);
+          setTransfers(transferResult);
           setError(null);
         }
       })
@@ -78,10 +133,86 @@ export function CashAccountsPage() {
   }, [user.business_id]);
 
   async function reloadAccounts() {
-    const result = await invoke<CashAccount[]>("cash_account_list", {
-      businessId: user.business_id,
-    });
+    const [result, balances, transferResult] = await Promise.all([
+      invoke<CashAccount[]>("cash_account_list", { businessId: user.business_id }),
+      invoke<CashAccountPaymentOption[]>("cash_account_payment_options", { businessId: user.business_id }),
+      invoke<CashTransfer[]>("cash_transfer_list", { businessId: user.business_id }),
+    ]);
     setAccounts(result);
+    setPaymentOptions(balances);
+    setTransfers(transferResult);
+  }
+
+  async function handleCreateTransfer(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const amount = parseMoney(transferAmount);
+    if (!fromAccountId || !toAccountId || fromAccountId === toAccountId || amount === null || amount <= 0) {
+      setError("Select two different opened accounts and enter a valid transfer amount.");
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    setIsSavingTransfer(true);
+    try {
+      await invoke<CashTransfer>("cash_transfer_create", {
+        businessId: user.business_id,
+        fromAccountId,
+        toAccountId,
+        amount,
+      });
+      setTransferAmount("");
+      await reloadAccounts();
+      setNotice("Transfer prepared. It will affect balances only after Owner/Admin confirmation.");
+    } catch (cause) {
+      setError(`Could not prepare the transfer. ${errorText(cause)}`);
+    } finally {
+      setIsSavingTransfer(false);
+    }
+  }
+
+  async function handleConfirmTransfer(transfer: CashTransfer) {
+    setError(null);
+    setNotice(null);
+    setConfirmingTransferId(transfer.id);
+    try {
+      await invoke("cash_transfer_confirm", {
+        businessId: user.business_id,
+        transferId: transfer.id,
+        confirmationReference: confirmationReferences[transfer.id]?.trim() || null,
+      });
+      await reloadAccounts();
+      setNotice("Transfer confirmed and both account movements were recorded.");
+    } catch (cause) {
+      setError(`Could not confirm the transfer. ${errorText(cause)}`);
+    } finally {
+      setConfirmingTransferId(null);
+    }
+  }
+
+  async function handleOpeningBalance(event: FormEvent<HTMLFormElement>, account: CashAccount) {
+    event.preventDefault();
+    const openingAmount = parseMoney(openingAmounts[account.id] ?? "");
+    if (openingAmount === null) {
+      setError("Enter a valid opening balance in RWF.");
+      return;
+    }
+    setError(null);
+    setNotice(null);
+    setOpeningAccountId(account.id);
+    try {
+      await invoke("cash_account_opening_create", {
+        businessId: user.business_id,
+        accountId: account.id,
+        openingAmount,
+      });
+      setOpeningAmounts((current) => ({ ...current, [account.id]: "" }));
+      await reloadAccounts();
+      setNotice(`Opening balance recorded for ${account.name}. It is permanent and cannot be silently edited.`);
+    } catch (cause) {
+      setError(`Could not record an opening balance for ${account.name}. ${errorText(cause)}`);
+    } finally {
+      setOpeningAccountId(null);
+    }
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -133,7 +264,7 @@ export function CashAccountsPage() {
       />
 
       <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm text-foreground">
-        These are account records only. Balances, transaction posting, transfers and daily cash closing are not enabled yet.
+        Balances start only from an Owner/Admin-authorized opening amount. New linked payments update the account automatically; legacy payments remain unassigned and are not guessed.
       </div>
 
       {error ? (
@@ -221,7 +352,9 @@ export function CashAccountsPage() {
             </div>
           ) : (
             <div className="divide-y">
-              {accounts.map((account) => (
+              {accounts.map((account) => {
+                const paymentOption = paymentOptions.find((option) => option.id === account.id);
+                return (
                 <div key={account.id} className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex min-w-0 items-start gap-3">
                     <Wallet className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
@@ -231,6 +364,42 @@ export function CashAccountsPage() {
                         {accountTypeLabel(account.account_type)}
                         {account.responsible_name ? ` · Responsible: ${account.responsible_name}` : ""}
                       </p>
+                      {paymentOption ? (
+                        <p className="text-sm font-medium">
+                          Available balance: {formatMoney(paymentOption.availableBalance)}
+                        </p>
+                      ) : account.is_active ? (
+                        <form
+                          className="flex flex-col gap-2 sm:flex-row sm:items-end"
+                          onSubmit={(event) => void handleOpeningBalance(event, account)}
+                        >
+                          <div className="space-y-1">
+                            <Label htmlFor={`opening-balance-${account.id}`} className="text-xs">
+                              Authorized opening balance (RWF)
+                            </Label>
+                            <Input
+                              id={`opening-balance-${account.id}`}
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              required
+                              value={openingAmounts[account.id] ?? ""}
+                              onChange={(event) => setOpeningAmounts((current) => ({
+                                ...current,
+                                [account.id]: event.target.value,
+                              }))}
+                            />
+                          </div>
+                          <Button type="submit" size="sm" disabled={openingAccountId !== null}>
+                            {openingAccountId === account.id ? <LoaderCircle className="animate-spin" /> : null}
+                            Record opening
+                          </Button>
+                        </form>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">
+                          {account.is_active ? "No opening balance recorded" : "Inactive; unavailable for new payments"}
+                        </p>
+                      )}
                     </div>
                     <Badge variant={account.is_active ? "default" : "secondary"}>
                       {account.is_active ? "Active" : "Inactive"}
@@ -247,8 +416,131 @@ export function CashAccountsPage() {
                     {account.is_active ? "Deactivate" : "Activate"}
                   </Button>
                 </div>
-              ))}
+                );
+              })}
             </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Transfer between accounts</CardTitle>
+          <CardDescription>
+            Transfers are custody movements, not expenses. Only confirmed transfers change account balances.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          {paymentOptions.length < 2 ? (
+            <p className="text-sm text-muted-foreground">
+              Record authorized opening balances for at least two active accounts before preparing a transfer.
+            </p>
+          ) : (
+            <form className="grid gap-4 md:grid-cols-2" onSubmit={(event) => void handleCreateTransfer(event)}>
+              <div className="space-y-2">
+                <Label htmlFor="transfer-from">Transfer from</Label>
+                <SelectField
+                  id="transfer-from"
+                  required
+                  value={fromAccountId}
+                  onChange={(event) => setFromAccountId(event.target.value)}
+                >
+                  <option value="">Select source account</option>
+                  {paymentOptions.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.name} · Available {formatMoney(account.availableBalance)}
+                    </option>
+                  ))}
+                </SelectField>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="transfer-to">Transfer to</Label>
+                <SelectField
+                  id="transfer-to"
+                  required
+                  value={toAccountId}
+                  onChange={(event) => setToAccountId(event.target.value)}
+                >
+                  <option value="">Select destination account</option>
+                  {paymentOptions.map((account) => (
+                    <option key={account.id} value={account.id} disabled={account.id === fromAccountId}>
+                      {account.name}
+                    </option>
+                  ))}
+                </SelectField>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="transfer-amount">Amount to transfer (RWF)</Label>
+                <Input
+                  id="transfer-amount"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  required
+                  value={transferAmount}
+                  onChange={(event) => setTransferAmount(event.target.value)}
+                />
+              </div>
+              <div className="flex items-end justify-end">
+                <Button type="submit" disabled={isSavingTransfer}>
+                  {isSavingTransfer ? <LoaderCircle className="animate-spin" /> : <Landmark />}
+                  {isSavingTransfer ? "Preparing..." : "Prepare transfer"}
+                </Button>
+              </div>
+            </form>
+          )}
+          {transfers.length > 0 ? (
+            <div className="divide-y rounded-lg border px-4">
+              {transfers.map((transfer) => {
+                const source = accounts.find((account) => account.id === transfer.fromAccountId);
+                const destination = accounts.find((account) => account.id === transfer.toAccountId);
+                return (
+                  <div key={transfer.id} className="space-y-3 py-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="font-medium">
+                        {source?.name ?? "Account"} → {destination?.name ?? "Account"} · {formatMoney(transfer.amount)}
+                      </p>
+                      <Badge variant={transfer.status === "confirmed" ? "default" : "secondary"}>
+                        {transfer.status === "confirmed" ? "Confirmed" : transfer.status}
+                      </Badge>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      Initiated {new Date(transfer.createdAt).toLocaleString()}
+                      {transfer.confirmationReference ? ` · Ref: ${transfer.confirmationReference}` : ""}
+                    </p>
+                    {transfer.status === "pending" ? (
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                        <div className="w-full space-y-1 sm:max-w-sm">
+                          <Label htmlFor={`transfer-reference-${transfer.id}`} className="text-xs">
+                            Confirmation reference (optional)
+                          </Label>
+                          <Input
+                            id={`transfer-reference-${transfer.id}`}
+                            maxLength={200}
+                            value={confirmationReferences[transfer.id] ?? ""}
+                            onChange={(event) => setConfirmationReferences((current) => ({
+                              ...current,
+                              [transfer.id]: event.target.value,
+                            }))}
+                          />
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled={confirmingTransferId !== null}
+                          onClick={() => void handleConfirmTransfer(transfer)}
+                        >
+                          {confirmingTransferId === transfer.id ? <LoaderCircle className="animate-spin" /> : null}
+                          Confirm transfer
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No account transfers have been prepared.</p>
           )}
         </CardContent>
       </Card>

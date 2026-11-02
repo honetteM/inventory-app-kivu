@@ -9,6 +9,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PageHeader } from "@/components/shared/page-header";
 import { SelectField } from "@/components/shared/select-field";
+import {
+  accountsForPaymentMethod,
+  loadCashAccountPaymentOptions,
+  type CashAccountPaymentOption,
+  type PaymentMethod,
+} from "@/modules/cash-accounts/cash-account-payment-options";
 
 const PAGE_SIZE = 30;
 const QUANTITY_SCALE = 1000n;
@@ -25,8 +31,6 @@ function moneyInputValueFromBigInt(scaledAmount: bigint): string {
   const fraction = scaledAmount % MONEY_SCALE;
   return fraction === 0n ? whole.toString() : `${whole}.${fraction.toString().padStart(2, "0")}`;
 }
-
-type PaymentMethod = "cash" | "mtn_mobile_money" | "airtel_money" | "bank_transfer";
 
 const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
   { value: "cash", label: "Cash" },
@@ -48,10 +52,11 @@ interface PaymentLine {
   id: string;
   method: PaymentMethod;
   amount: string;
+  accountId: string;
 }
 
 function newPaymentLine(): PaymentLine {
-  return { id: crypto.randomUUID(), method: "cash", amount: "" };
+  return { id: crypto.randomUUID(), method: "cash", amount: "", accountId: "" };
 }
 
 function formatScaledQuantity(scaled: bigint): string {
@@ -97,7 +102,7 @@ interface SaleReceipt {
   balance_due: number;
   customer_name: string | null;
   created_at: string;
-  payments: { payment_method: PaymentMethod; amount: number }[];
+  payments: { payment_method: PaymentMethod; amount: number; account_id: string }[];
   items: {
     product_name: string;
     sku: string;
@@ -190,11 +195,13 @@ export function PosPage() {
   const [page, setPage] = useState(0);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [cashAccounts, setCashAccounts] = useState<CashAccountPaymentOption[]>([]);
   const [customerId, setCustomerId] = useState("");
   const [paymentLines, setPaymentLines] = useState<PaymentLine[]>([newPaymentLine()]);
   const [completedSale, setCompletedSale] = useState<SaleReceipt | null>(null);
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
   const [isLoadingCustomers, setIsLoadingCustomers] = useState(false);
+  const [isLoadingCashAccounts, setIsLoadingCashAccounts] = useState(false);
   const [isLoadingProducts, setIsLoadingProducts] = useState(false);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const [refreshToken, setRefreshToken] = useState(0);
@@ -272,6 +279,43 @@ export function PosPage() {
       .finally(() => {
         if (active) {
           setIsLoadingCustomers(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [businessId]);
+
+  useEffect(() => {
+    if (!businessId) {
+      setCashAccounts([]);
+      return;
+    }
+
+    let active = true;
+    setIsLoadingCashAccounts(true);
+    loadCashAccountPaymentOptions(businessId)
+      .then((result) => {
+        if (active) {
+          setCashAccounts(result);
+          setPaymentLines((current) => current.map((payment) => {
+            const options = accountsForPaymentMethod(result, payment.method);
+            return options.some((account) => account.id === payment.accountId)
+              ? payment
+              : { ...payment, accountId: options[0]?.id ?? "" };
+          }));
+        }
+      })
+      .catch((cause: unknown) => {
+        if (active) {
+          setCashAccounts([]);
+          setError(`Could not load opened cash accounts. ${errorText(cause)}`);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsLoadingCashAccounts(false);
         }
       });
 
@@ -391,9 +435,21 @@ export function PosPage() {
     });
   }
 
-  function updatePaymentLine(id: string, patch: Partial<Pick<PaymentLine, "method" | "amount">>) {
+  function updatePaymentLine(id: string, patch: Partial<Pick<PaymentLine, "method" | "amount" | "accountId">>) {
     setPaymentLines((current) =>
-      current.map((payment) => payment.id === id ? { ...payment, ...patch } : payment),
+      current.map((payment) => {
+        if (payment.id !== id) {
+          return payment;
+        }
+        const updated = { ...payment, ...patch };
+        if (patch.method) {
+          const options = accountsForPaymentMethod(cashAccounts, updated.method);
+          if (!options.some((account) => account.id === updated.accountId)) {
+            updated.accountId = options[0]?.id ?? "";
+          }
+        }
+        return updated;
+      }),
     );
   }
 
@@ -432,7 +488,7 @@ export function PosPage() {
       });
     }
 
-    const payments: { paymentMethod: PaymentMethod; amount: number }[] = [];
+    const payments: { paymentMethod: PaymentMethod; amount: number; accountId: string }[] = [];
     let amountPaid = 0n;
     for (const payment of paymentLines) {
       if (!payment.amount.trim() && paymentLines.length > 1) {
@@ -447,6 +503,10 @@ export function PosPage() {
       if (amount === 0n) {
         continue;
       }
+      if (!payment.accountId) {
+        setError(`Select an opened ${payment.method === "cash" ? "cash" : "payment"} account for payment ${payments.length + 1}.`);
+        return;
+      }
       if (amount > MAX_SAFE_INTEGER) {
         setError("Payment amount exceeds the supported range.");
         return;
@@ -460,7 +520,7 @@ export function PosPage() {
         setError("A sale can have no more than 10 payment entries.");
         return;
       }
-      payments.push({ paymentMethod: payment.method, amount: Number(amount) });
+      payments.push({ paymentMethod: payment.method, amount: Number(amount), accountId: payment.accountId });
     }
     if (amountPaid > cartTotal) {
       setError("Payments cannot exceed the sale total.");
@@ -493,6 +553,11 @@ export function PosPage() {
       setCart([]);
       setPaymentLines([newPaymentLine()]);
       setRefreshToken((current) => current + 1);
+      try {
+        setCashAccounts(await loadCashAccountPaymentOptions(businessId));
+      } catch (cause) {
+        setError(`Sale was recorded, but account balances could not be refreshed. ${errorText(cause)}`);
+      }
     } catch (cause) {
       const message = errorText(cause);
       const belowCostMatch = /BELOW_FIFO_COST:([^:]+):/.exec(message);
@@ -863,7 +928,7 @@ export function PosPage() {
                 ) : (
                   <div className="space-y-2">
                     {paymentLines.map((payment, index) => (
-                      <div key={payment.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2">
+                      <div key={payment.id} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(0,1fr)_auto] sm:items-end">
                         <div className="space-y-1">
                           <Label htmlFor={`pos-payment-method-${payment.id}`} className="text-xs">Method {index + 1}</Label>
                           <SelectField
@@ -878,6 +943,22 @@ export function PosPage() {
                           >
                             {PAYMENT_METHODS.map((method) => (
                               <option key={method.value} value={method.value}>{method.label}</option>
+                            ))}
+                          </SelectField>
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor={`pos-payment-account-${payment.id}`} className="text-xs">Account</Label>
+                          <SelectField
+                            id={`pos-payment-account-${payment.id}`}
+                            value={payment.accountId}
+                            disabled={isLoadingCashAccounts}
+                            onChange={(event) => updatePaymentLine(payment.id, { accountId: event.target.value })}
+                          >
+                            <option value="">Select opened account</option>
+                            {accountsForPaymentMethod(cashAccounts, payment.method).map((account) => (
+                              <option key={account.id} value={account.id}>
+                                {account.name} · {formatProductPrice(account.availableBalance)}
+                              </option>
                             ))}
                           </SelectField>
                         </div>
@@ -914,9 +995,14 @@ export function PosPage() {
                   Any unpaid amount will be recorded as customer credit, subject to the customer&apos;s credit limit.
                 </p>
               ) : null}
+              {paymentLines.some((payment) => accountsForPaymentMethod(cashAccounts, payment.method).length === 0) ? (
+                <p className="text-xs text-amber-700">
+                  A payment method has no opened account. Ask the Owner/Admin to register the account and record its authorized opening balance.
+                </p>
+              ) : null}
               <Button
                 className="w-full"
-                disabled={cart.length === 0 || hasInvalidCartItem || isCheckingOut || isLoadingCustomers}
+                disabled={cart.length === 0 || hasInvalidCartItem || isCheckingOut || isLoadingCustomers || isLoadingCashAccounts}
                 onClick={handleCheckout}
               >
                 {isCheckingOut ? <LoaderCircle className="animate-spin" /> : <ShoppingCart />}

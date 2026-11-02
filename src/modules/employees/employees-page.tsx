@@ -223,7 +223,7 @@ export function EmployeesPage() {
             <div>
               <p className="font-medium">Manager permissions</p>
               <p className="mt-1 text-sm text-muted-foreground">
-                Managers can handle products, stock, purchases, sales, customers and suppliers. Financial reports, expenses, cash accounts and employee access remain Owner/Admin-only. Managers can view purchase costs.
+                Managers can handle products, stock, purchases, sales, customers and suppliers, and can view opened account balances when choosing a payment source. Financial reports, expenses, cash-account administration and employee access remain Owner/Admin-only. Managers can view purchase costs.
               </p>
             </div>
             {isLoadingPermissions ? (
