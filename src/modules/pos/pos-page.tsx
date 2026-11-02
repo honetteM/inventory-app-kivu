@@ -761,38 +761,36 @@ export function PosPage() {
                           <Trash2 />
                         </Button>
                       </div>
-                      <div className="flex items-end justify-between gap-3">
-                        <div className="grid flex-1 gap-3">
-                          <div className="space-y-1">
-                            <Label htmlFor={`pos-quantity-${item.product.id}`} className="text-xs">
-                              Quantity ({item.product.base_unit_name})
-                            </Label>
-                            <Input
-                              id={`pos-quantity-${item.product.id}`}
-                              type="number"
-                              min={item.product.base_unit_allows_decimals ? "0.001" : "1"}
-                              max={formatQuantity(item.product.quantity_on_hand)}
-                              step={item.product.base_unit_allows_decimals ? "0.001" : "1"}
-                              value={item.quantity}
-                              onChange={(event) => updateCartItem(item.product.id, { quantity: event.target.value })}
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <Label htmlFor={`pos-price-${item.product.id}`} className="text-xs">
-                              Selling price per {item.product.base_unit_name} (RWF)
-                            </Label>
-                            <Input
-                              id={`pos-price-${item.product.id}`}
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              value={item.sellingPrice}
-                              onChange={(event) => updateCartItem(item.product.id, { sellingPrice: event.target.value })}
-                            />
-                          </div>
+                      <div className="grid min-w-0 gap-3">
+                        <div className="space-y-1">
+                          <Label htmlFor={`pos-quantity-${item.product.id}`} className="text-xs">
+                            Quantity ({item.product.base_unit_name})
+                          </Label>
+                          <Input
+                            id={`pos-quantity-${item.product.id}`}
+                            type="number"
+                            min={item.product.base_unit_allows_decimals ? "0.001" : "1"}
+                            max={formatQuantity(item.product.quantity_on_hand)}
+                            step={item.product.base_unit_allows_decimals ? "0.001" : "1"}
+                            value={item.quantity}
+                            onChange={(event) => updateCartItem(item.product.id, { quantity: event.target.value })}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor={`pos-price-${item.product.id}`} className="text-xs">
+                            Selling price per {item.product.base_unit_name} (RWF)
+                          </Label>
+                          <Input
+                            id={`pos-price-${item.product.id}`}
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={item.sellingPrice}
+                            onChange={(event) => updateCartItem(item.product.id, { sellingPrice: event.target.value })}
+                          />
                         </div>
                         {priceChanged || item.belowCostReasonRequired ? (
-                          <div className="space-y-1">
+                          <div className="min-w-0 space-y-1">
                             <Label htmlFor={`pos-price-reason-${item.product.id}`} className="text-xs">
                               Reason for price change or below-cost sale (required)
                             </Label>
@@ -806,7 +804,7 @@ export function PosPage() {
                             />
                           </div>
                         ) : null}
-                        <p className="text-right font-semibold">
+                        <p className="text-right font-semibold tabular-nums">
                           {total === null ? "Check quantity / price / reason" : formatMoney(total)}
                         </p>
                       </div>
