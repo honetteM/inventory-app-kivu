@@ -2,10 +2,13 @@ import { useEffect, useRef } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
+import { Button } from "@/components/ui/button";
 import { AppSidebar } from "./app-sidebar";
 import { navGroups } from "@/app/routes/navigation";
+import { useAuthentication } from "@/modules/auth/auth-gate";
 
 export function AppLayout() {
+  const { user, logout, error } = useAuthentication();
   const { pathname } = useLocation();
   const mainRef = useRef<HTMLElement>(null);
   const currentGroup = navGroups.find((group) =>
@@ -35,10 +38,18 @@ export function AppLayout() {
           </div>
           <div className="ml-auto flex items-center gap-2 rounded-full border border-border/80 bg-background px-3 py-1.5 text-xs font-medium text-muted-foreground">
             <span aria-hidden="true" className="size-1.5 rounded-full bg-emerald-600" />
-            <span className="hidden sm:inline">Local workspace</span>
+            <span className="hidden sm:inline">{user.full_name}</span>
             <span className="sm:hidden">Local</span>
           </div>
+          <Button type="button" variant="outline" size="sm" onClick={() => void logout()}>
+            Sign out
+          </Button>
         </header>
+        {error ? (
+          <div role="alert" className="border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-sm text-destructive lg:px-6">
+            {error}
+          </div>
+        ) : null}
         <main ref={mainRef} className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
           <div className="page-content">
           <Outlet />

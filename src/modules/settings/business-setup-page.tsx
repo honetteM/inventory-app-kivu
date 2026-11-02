@@ -32,6 +32,7 @@ export function BusinessSetupPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -62,16 +63,17 @@ export function BusinessSetupPage() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+    setNotice(null);
     setIsSaving(true);
 
     try {
-      const business = await invoke<Business>("business_create", {
+      await invoke<Business>("business_create", {
         name: name.trim(),
         taxId: taxId.trim() || null,
       });
-      setBusinesses((current) => [...current, business].sort((a, b) => a.name.localeCompare(b.name)));
       setName("");
       setTaxId("");
+      setNotice("Business created with your owner sign-in. Sign out and choose it on the sign-in screen before managing its records.");
     } catch (cause) {
       setError(`Could not save the business. ${errorMessage(cause)}`);
     } finally {
@@ -94,6 +96,11 @@ export function BusinessSetupPage() {
         >
           <p className="font-medium">Business configuration failed</p>
           <p className="mt-1">{error}</p>
+        </div>
+      ) : null}
+      {notice ? (
+        <div role="status" className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-foreground">
+          {notice}
         </div>
       ) : null}
 

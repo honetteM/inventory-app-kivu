@@ -1,15 +1,122 @@
 mod db;
 
+use argon2::{
+    Argon2,
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+};
+use rand_core::OsRng;
 use tauri::Manager;
+
+fn hash_password(password: &str) -> Result<String, String> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|error| format!("could not secure the password: {error}"))
+}
+
+fn verify_password(password: &str, password_hash: &str) -> Result<(), String> {
+    let parsed_hash = PasswordHash::new(password_hash)
+        .map_err(|error| format!("stored password hash is invalid: {error}"))?;
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .map_err(|_| "business, username or password is incorrect".to_string())
+}
+
+#[tauri::command]
+fn auth_business_status(
+    state: tauri::State<db::DbState>,
+) -> Result<Vec<db::AuthBusinessStatus>, String> {
+    state
+        .with_public(db::auth_business_status)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn auth_bootstrap_owner(
+    state: tauri::State<db::DbState>,
+    business_id: Option<String>,
+    new_business_name: Option<String>,
+    username: String,
+    full_name: String,
+    password: String,
+) -> Result<db::AuthUser, String> {
+    if password.chars().count() < 12 || password.chars().count() > 128 {
+        return Err("password must be 12-128 characters long".to_string());
+    }
+    let password_hash = hash_password(&password)?;
+    let user = state
+        .with_public(|conn| {
+            db::bootstrap_owner(
+                conn,
+                business_id.as_deref(),
+                new_business_name.as_deref(),
+                &username,
+                &full_name,
+                &password_hash,
+            )
+        })
+        .map_err(|error| error.to_string())?;
+    state
+        .set_session(user.clone())
+        .map_err(|error| error.to_string())?;
+    Ok(user)
+}
+
+#[tauri::command]
+fn auth_login(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    username: String,
+    password: String,
+) -> Result<db::AuthUser, String> {
+    state.clear_session().map_err(|error| error.to_string())?;
+    if password.chars().count() > 128 {
+        return Err("business, username or password is incorrect".to_string());
+    }
+    let credentials = state
+        .with_public(|conn| db::auth_credentials(conn, &business_id, &username))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "business, username or password is incorrect".to_string())?;
+    verify_password(&password, &credentials.password_hash)?;
+    state
+        .with_public(|conn| db::record_successful_login(conn, &credentials.user))
+        .map_err(|error| error.to_string())?;
+    state
+        .set_session(credentials.user.clone())
+        .map_err(|error| error.to_string())?;
+    Ok(credentials.user)
+}
+
+#[tauri::command]
+fn auth_logout(state: tauri::State<db::DbState>) -> Result<(), String> {
+    state.clear_session().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn auth_current_user(state: tauri::State<db::DbState>) -> Result<db::AuthUser, String> {
+    state
+        .with_authenticated(|_, user| Ok(user.clone()))
+        .map_err(|error| error.to_string())
+}
 
 #[tauri::command]
 fn db_info(state: tauri::State<db::DbState>) -> Result<db::DbInfo, String> {
-    state.with(db::info).map_err(|e| e.to_string())
+    state
+        .with_authenticated(|conn, _| db::info(conn))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 fn business_list(state: tauri::State<db::DbState>) -> Result<Vec<db::Business>, String> {
-    state.with(db::list_businesses).map_err(|e| e.to_string())
+    state
+        .with_authenticated(|conn, user| {
+            Ok(db::list_businesses(conn)?
+                .into_iter()
+                .filter(|business| business.id == user.business_id)
+                .collect())
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -19,8 +126,10 @@ fn business_create(
     tax_id: Option<String>,
 ) -> Result<db::Business, String> {
     state
-        .with(|conn| db::create_business(conn, &name, tax_id.as_deref()))
-        .map_err(|e| e.to_string())
+        .with_authenticated(|conn, user| {
+            db::create_business_for_owner(conn, user, &name, tax_id.as_deref())
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -29,7 +138,7 @@ fn category_list(
     business_id: String,
 ) -> Result<Vec<db::Category>, String> {
     state
-        .with(|conn| db::list_categories(conn, &business_id))
+        .with_business(&business_id, |conn| db::list_categories(conn, &business_id))
         .map_err(|e| e.to_string())
 }
 
@@ -42,7 +151,7 @@ fn category_create(
     description: Option<String>,
 ) -> Result<db::Category, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::create_category(
                 conn,
                 &business_id,
@@ -60,7 +169,7 @@ fn unit_list(
     business_id: String,
 ) -> Result<Vec<db::Unit>, String> {
     state
-        .with(|conn| db::list_units(conn, &business_id))
+        .with_business(&business_id, |conn| db::list_units(conn, &business_id))
         .map_err(|e| e.to_string())
 }
 
@@ -73,7 +182,9 @@ fn unit_create(
     decimals_ok: bool,
 ) -> Result<db::Unit, String> {
     state
-        .with(|conn| db::create_unit(conn, &business_id, &code, &name, decimals_ok))
+        .with_business(&business_id, |conn| {
+            db::create_unit(conn, &business_id, &code, &name, decimals_ok)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -83,7 +194,7 @@ fn brand_list(
     business_id: String,
 ) -> Result<Vec<db::Brand>, String> {
     state
-        .with(|conn| db::list_brands(conn, &business_id))
+        .with_business(&business_id, |conn| db::list_brands(conn, &business_id))
         .map_err(|e| e.to_string())
 }
 
@@ -94,7 +205,9 @@ fn brand_create(
     name: String,
 ) -> Result<db::Brand, String> {
     state
-        .with(|conn| db::create_brand(conn, &business_id, &name))
+        .with_business(&business_id, |conn| {
+            db::create_brand(conn, &business_id, &name)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -104,7 +217,7 @@ fn supplier_list(
     business_id: String,
 ) -> Result<Vec<db::Supplier>, String> {
     state
-        .with(|conn| db::list_suppliers(conn, &business_id))
+        .with_business(&business_id, |conn| db::list_suppliers(conn, &business_id))
         .map_err(|e| e.to_string())
 }
 
@@ -120,7 +233,7 @@ fn supplier_create(
     tax_id: Option<String>,
 ) -> Result<db::Supplier, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::create_supplier(
                 conn,
                 &business_id,
@@ -149,7 +262,7 @@ fn supplier_update(
     is_active: bool,
 ) -> Result<db::Supplier, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::update_supplier(
                 conn,
                 &business_id,
@@ -172,7 +285,7 @@ fn customer_list(
     business_id: String,
 ) -> Result<Vec<db::Customer>, String> {
     state
-        .with(|conn| db::list_customers(conn, &business_id))
+        .with_business(&business_id, |conn| db::list_customers(conn, &business_id))
         .map_err(|e| e.to_string())
 }
 
@@ -187,7 +300,7 @@ fn customer_create(
     credit_limit: i64,
 ) -> Result<db::Customer, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::create_customer(
                 conn,
                 &business_id,
@@ -214,7 +327,7 @@ fn customer_update(
     is_active: bool,
 ) -> Result<db::Customer, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::update_customer(
                 conn,
                 &business_id,
@@ -236,7 +349,9 @@ fn purchase_product_list(
     business_id: String,
 ) -> Result<Vec<db::PurchaseProduct>, String> {
     state
-        .with(|conn| db::list_purchase_products(conn, &business_id))
+        .with_business(&business_id, |conn| {
+            db::list_purchase_products(conn, &business_id)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -246,7 +361,7 @@ fn purchase_list(
     business_id: String,
 ) -> Result<Vec<db::Purchase>, String> {
     state
-        .with(|conn| db::list_purchases(conn, &business_id))
+        .with_business(&business_id, |conn| db::list_purchases(conn, &business_id))
         .map_err(|e| e.to_string())
 }
 
@@ -260,7 +375,7 @@ fn purchase_create(
     authorize_duplicate: bool,
 ) -> Result<db::Purchase, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::create_purchase(
                 conn,
                 &business_id,
@@ -282,7 +397,7 @@ fn purchase_record_payment(
     payment_method: String,
 ) -> Result<db::Purchase, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::record_purchase_payment(conn, &business_id, &purchase_id, amount, &payment_method)
         })
         .map_err(|e| e.to_string())
@@ -298,7 +413,7 @@ fn purchase_receive_delivery(
     notes: Option<String>,
 ) -> Result<db::PurchaseReceipt, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::receive_purchase_delivery(
                 conn,
                 &business_id,
@@ -320,7 +435,9 @@ fn product_list(
     limit: i64,
 ) -> Result<db::ProductPage, String> {
     state
-        .with(|conn| db::list_products(conn, &business_id, search.as_deref(), offset, limit))
+        .with_business(&business_id, |conn| {
+            db::list_products(conn, &business_id, search.as_deref(), offset, limit)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -333,7 +450,9 @@ fn pos_product_search(
     limit: i64,
 ) -> Result<db::PosProductPage, String> {
     state
-        .with(|conn| db::search_pos_products(conn, &business_id, search.as_deref(), offset, limit))
+        .with_business(&business_id, |conn| {
+            db::search_pos_products(conn, &business_id, search.as_deref(), offset, limit)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -346,7 +465,7 @@ fn pos_checkout(
     payments: Vec<db::SalePaymentInput>,
 ) -> Result<db::SaleReceipt, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::checkout_sale_with_payments(
                 conn,
                 &business_id,
@@ -364,7 +483,9 @@ fn customer_debt_list(
     business_id: String,
 ) -> Result<Vec<db::CustomerDebt>, String> {
     state
-        .with(|conn| db::list_customer_debts(conn, &business_id))
+        .with_business(&business_id, |conn| {
+            db::list_customer_debts(conn, &business_id)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -375,7 +496,9 @@ fn customer_statement(
     customer_id: String,
 ) -> Result<db::CustomerStatement, String> {
     state
-        .with(|conn| db::customer_statement(conn, &business_id, &customer_id))
+        .with_business(&business_id, |conn| {
+            db::customer_statement(conn, &business_id, &customer_id)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -387,7 +510,9 @@ fn expense_list(
     limit: i64,
 ) -> Result<db::ExpensePage, String> {
     state
-        .with(|conn| db::list_expenses(conn, &business_id, offset, limit))
+        .with_business(&business_id, |conn| {
+            db::list_expenses(conn, &business_id, offset, limit)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -398,7 +523,9 @@ fn daily_business_report(
     report_date: String,
 ) -> Result<db::DailyBusinessReport, String> {
     state
-        .with(|conn| db::daily_business_report(conn, &business_id, &report_date))
+        .with_business(&business_id, |conn| {
+            db::daily_business_report(conn, &business_id, &report_date)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -414,7 +541,7 @@ fn expense_create(
     responsible_name: String,
 ) -> Result<db::Expense, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::create_expense(
                 conn,
                 &business_id,
@@ -438,7 +565,7 @@ fn customer_debt_record_payment(
     amount: i64,
 ) -> Result<db::CustomerDebtPayment, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::record_customer_debt_payment(conn, &business_id, &debt_id, &payment_method, amount)
         })
         .map_err(|e| e.to_string())
@@ -463,7 +590,7 @@ fn product_create(
     vat_class: String,
 ) -> Result<db::Product, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::create_product(
                 conn,
                 &business_id,
@@ -493,7 +620,9 @@ fn product_selling_price_update(
     selling_price: i64,
 ) -> Result<(), String> {
     state
-        .with(|conn| db::update_base_selling_price(conn, &business_id, &product_id, selling_price))
+        .with_business(&business_id, |conn| {
+            db::update_base_selling_price(conn, &business_id, &product_id, selling_price)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -504,7 +633,9 @@ fn product_unit_list(
     product_id: String,
 ) -> Result<Vec<db::ProductUnit>, String> {
     state
-        .with(|conn| db::list_product_units(conn, &business_id, &product_id))
+        .with_business(&business_id, |conn| {
+            db::list_product_units(conn, &business_id, &product_id)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -518,7 +649,7 @@ fn product_unit_create(
     selling_price: Option<i64>,
 ) -> Result<db::ProductUnit, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::create_product_unit(
                 conn,
                 &business_id,
@@ -540,7 +671,9 @@ fn inventory_list(
     limit: i64,
 ) -> Result<db::InventoryPage, String> {
     state
-        .with(|conn| db::list_inventory(conn, &business_id, search.as_deref(), offset, limit))
+        .with_business(&business_id, |conn| {
+            db::list_inventory(conn, &business_id, search.as_deref(), offset, limit)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -553,7 +686,7 @@ fn stock_movement_list(
     limit: i64,
 ) -> Result<Vec<db::StockMovement>, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::list_stock_movements(conn, &business_id, product_id.as_deref(), offset, limit)
         })
         .map_err(|e| e.to_string())
@@ -568,7 +701,7 @@ fn inventory_set_opening_stock(
     reason: Option<String>,
 ) -> Result<db::StockMovement, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             db::set_opening_stock(conn, &business_id, &product_id, quantity, reason.as_deref())
         })
         .map_err(|e| e.to_string())
@@ -583,7 +716,9 @@ fn inventory_correct_stock(
     reason: String,
 ) -> Result<db::StockMovement, String> {
     state
-        .with(|conn| db::correct_stock(conn, &business_id, &product_id, target_quantity, &reason))
+        .with_business(&business_id, |conn| {
+            db::correct_stock(conn, &business_id, &product_id, target_quantity, &reason)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -599,7 +734,7 @@ fn inventory_receive_stock(
     new_selling_price: Option<i64>,
 ) -> Result<db::StockMovement, String> {
     state
-        .with(|conn| {
+        .with_business(&business_id, |conn| {
             if let Some(new_selling_price) = new_selling_price {
                 db::receive_stock_with_selling_price(
                     conn,
@@ -637,6 +772,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            auth_business_status,
+            auth_bootstrap_owner,
+            auth_login,
+            auth_logout,
+            auth_current_user,
             db_info,
             business_list,
             business_create,
@@ -678,4 +818,18 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    #[test]
+    fn passwords_are_argon2id_hashed_and_verified() {
+        let hash = hash_password("correct horse battery staple").unwrap();
+
+        assert!(hash.starts_with("$argon2id$"));
+        assert!(verify_password("correct horse battery staple", &hash).is_ok());
+        assert!(verify_password("incorrect password", &hash).is_err());
+    }
 }

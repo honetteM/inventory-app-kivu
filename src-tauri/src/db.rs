@@ -90,18 +90,79 @@ pub enum DbError {
 /// Application state holding the single SQLite connection.
 pub struct DbState {
     conn: Mutex<Connection>,
+    session: Mutex<Option<AuthUser>>,
 }
 
 impl DbState {
     pub fn new(conn: Connection) -> Self {
         Self {
             conn: Mutex::new(conn),
+            session: Mutex::new(None),
         }
     }
 
-    pub fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T, DbError>) -> Result<T, DbError> {
+    pub fn with_public<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
         let conn = self.conn.lock().map_err(|_| DbError::LockPoisoned)?;
         f(&conn)
+    }
+
+    pub fn with_authenticated<T>(
+        &self,
+        f: impl FnOnce(&Connection, &AuthUser) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| DbError::LockPoisoned)?
+            .clone()
+            .ok_or_else(|| DbError::InvalidInput("sign in to continue".to_string()))?;
+        let conn = self.conn.lock().map_err(|_| DbError::LockPoisoned)?;
+        let active_user: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM users u
+                JOIN user_roles ur ON ur.user_id = u.id
+                JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
+                WHERE u.id = ?1 AND u.business_id = ?2 AND u.is_active = 1
+                  AND r.name = 'owner' AND r.name = ?3
+            )",
+            params![session.id, session.business_id, session.role],
+            |row| row.get(0),
+        )?;
+        if !active_user {
+            *self.session.lock().map_err(|_| DbError::LockPoisoned)? = None;
+            return Err(DbError::InvalidInput(
+                "your account is inactive or no longer authorized; sign in again".to_string(),
+            ));
+        }
+        f(&conn, &session)
+    }
+
+    pub fn with_business<T>(
+        &self,
+        business_id: &str,
+        f: impl FnOnce(&Connection) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        self.with_authenticated(|conn, session| {
+            if session.business_id != business_id {
+                return Err(DbError::InvalidInput(
+                    "you are not signed in to this business".to_string(),
+                ));
+            }
+            f(conn)
+        })
+    }
+
+    pub fn set_session(&self, user: AuthUser) -> Result<(), DbError> {
+        *self.session.lock().map_err(|_| DbError::LockPoisoned)? = Some(user);
+        Ok(())
+    }
+
+    pub fn clear_session(&self) -> Result<(), DbError> {
+        *self.session.lock().map_err(|_| DbError::LockPoisoned)? = None;
+        Ok(())
     }
 }
 
@@ -329,6 +390,357 @@ pub struct Business {
     pub language: String,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct AuthUser {
+    pub id: String,
+    pub business_id: String,
+    pub username: String,
+    pub full_name: String,
+    pub role: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct AuthBusinessStatus {
+    pub id: String,
+    pub name: String,
+    pub requires_owner_setup: bool,
+}
+
+#[derive(Debug)]
+pub struct AuthCredentials {
+    pub user: AuthUser,
+    pub password_hash: String,
+}
+
+pub fn auth_business_status(conn: &Connection) -> Result<Vec<AuthBusinessStatus>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT b.id, b.name,
+                NOT EXISTS (SELECT 1 FROM users u WHERE u.business_id = b.id)
+         FROM businesses b WHERE b.is_active = 1
+         ORDER BY b.name COLLATE NOCASE, b.id",
+    )?;
+    let businesses = stmt
+        .query_map([], |row| {
+            Ok(AuthBusinessStatus {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                requires_owner_setup: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(businesses)
+}
+
+fn validate_auth_identity(username: &str, full_name: &str) -> Result<(String, String), DbError> {
+    let username = username.trim().to_ascii_lowercase();
+    if !(3..=32).contains(&username.len())
+        || !username
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(DbError::InvalidInput(
+            "username must be 3–32 characters using letters, numbers, dots, underscores or hyphens"
+                .to_string(),
+        ));
+    }
+    let full_name = full_name.trim();
+    if full_name.is_empty() || full_name.chars().count() > 120 {
+        return Err(DbError::InvalidInput(
+            "full name is required and must be 120 characters or fewer".to_string(),
+        ));
+    }
+    Ok((username, full_name.to_string()))
+}
+
+pub fn bootstrap_owner(
+    conn: &Connection,
+    business_id: Option<&str>,
+    new_business_name: Option<&str>,
+    username: &str,
+    full_name: &str,
+    password_hash: &str,
+) -> Result<AuthUser, DbError> {
+    let (username, full_name) = validate_auth_identity(username, full_name)?;
+    if password_hash.trim().is_empty() {
+        return Err(DbError::InvalidInput(
+            "a valid password hash is required".to_string(),
+        ));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let business_id = if let Some(business_id) = business_id {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM businesses WHERE id = ?1 AND is_active = 1)",
+            params![business_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(DbError::InvalidInput("business does not exist".to_string()));
+        }
+        business_id.to_string()
+    } else {
+        let business_count: i64 =
+            tx.query_row("SELECT COUNT(*) FROM businesses", [], |row| row.get(0))?;
+        if business_count != 0 {
+            return Err(DbError::InvalidInput(
+                "select an existing business to set up its first owner".to_string(),
+            ));
+        }
+        let name = new_business_name.map(str::trim).unwrap_or_default();
+        if name.is_empty() || name.chars().count() > 120 {
+            return Err(DbError::InvalidInput(
+                "business name is required and must be 120 characters or fewer".to_string(),
+            ));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let timestamp = now_utc();
+        tx.execute(
+            "INSERT INTO businesses (id, name, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3)",
+            params![id, name, timestamp],
+        )?;
+        id
+    };
+
+    let existing_user_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM users WHERE business_id = ?1",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    if existing_user_count != 0 {
+        return Err(DbError::InvalidInput(
+            "an owner account has already been created for this business".to_string(),
+        ));
+    }
+
+    let role_id = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO roles (id, business_id, name, display_name, is_system, created_at, updated_at)
+         VALUES (?1, ?2, 'owner', 'Owner', 1, ?3, ?3)
+         ON CONFLICT (business_id, name) DO NOTHING",
+        params![role_id, business_id, now_utc()],
+    )?;
+    let role_id: String = tx.query_row(
+        "SELECT id FROM roles WHERE business_id = ?1 AND name = 'owner'",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    let user_id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    tx.execute(
+        "INSERT INTO users
+            (id, business_id, username, full_name, password_hash, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![
+            user_id,
+            business_id,
+            username,
+            full_name,
+            password_hash,
+            timestamp
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO user_roles (id, user_id, role_id, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            user_id,
+            role_id,
+            timestamp
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'owner_bootstrapped', 'user', ?3,
+                 'Initial owner account created', ?4)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            user_id,
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    Ok(AuthUser {
+        id: user_id,
+        business_id,
+        username,
+        full_name,
+        role: "owner".to_string(),
+    })
+}
+
+pub fn create_business_for_owner(
+    conn: &Connection,
+    current_user: &AuthUser,
+    name: &str,
+    tax_id: Option<&str>,
+) -> Result<Business, DbError> {
+    if current_user.role != "owner" {
+        return Err(DbError::InvalidInput(
+            "an active owner account is required".to_string(),
+        ));
+    }
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err(DbError::InvalidInput(
+            "business name is required and must be 120 characters or fewer".to_string(),
+        ));
+    }
+    let tax_id = tax_id.map(str::trim).filter(|value| !value.is_empty());
+    if tax_id.is_some_and(|value| value.chars().count() > 80) {
+        return Err(DbError::InvalidInput(
+            "tax identification number must be 80 characters or fewer".to_string(),
+        ));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let (username, full_name, password_hash): (String, String, String) = tx
+        .query_row(
+            "SELECT u.username, u.full_name, u.password_hash
+             FROM users u
+             JOIN user_roles ur ON ur.user_id = u.id
+             JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
+             WHERE u.id = ?1 AND u.business_id = ?2 AND u.is_active = 1
+               AND r.name = 'owner'",
+            params![current_user.id, current_user.business_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or_else(|| DbError::InvalidInput("an active owner account is required".to_string()))?;
+
+    let business_id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    tx.execute(
+        "INSERT INTO businesses (id, name, tax_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![business_id, name, tax_id, timestamp],
+    )?;
+    let role_id = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO roles (id, business_id, name, display_name, is_system, created_at, updated_at)
+         VALUES (?1, ?2, 'owner', 'Owner', 1, ?3, ?3)",
+        params![role_id, business_id, timestamp],
+    )?;
+    let user_id = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO users
+            (id, business_id, username, full_name, password_hash, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![
+            user_id,
+            business_id,
+            username,
+            full_name,
+            password_hash,
+            timestamp
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO user_roles (id, user_id, role_id, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            user_id,
+            role_id,
+            timestamp
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'business_created', 'business', ?2,
+                 'Business and owner access created', ?4)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            user_id,
+            timestamp
+        ],
+    )?;
+    let business = tx.query_row(
+        "SELECT id, name, tax_id, currency, timezone, date_format, language
+         FROM businesses WHERE id = ?1",
+        params![business_id],
+        |row| {
+            Ok(Business {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                tax_id: row.get(2)?,
+                currency: row.get(3)?,
+                timezone: row.get(4)?,
+                date_format: row.get(5)?,
+                language: row.get(6)?,
+            })
+        },
+    )?;
+    tx.commit()?;
+    Ok(business)
+}
+
+pub fn auth_credentials(
+    conn: &Connection,
+    business_id: &str,
+    username: &str,
+) -> Result<Option<AuthCredentials>, DbError> {
+    let username = username.trim().to_ascii_lowercase();
+    let result = conn
+        .query_row(
+            "SELECT u.id, u.business_id, u.username, u.full_name, r.name, u.password_hash
+             FROM users u
+             JOIN user_roles ur ON ur.user_id = u.id
+             JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
+             WHERE u.business_id = ?1 AND u.username = ?2 AND u.is_active = 1
+               AND r.name = 'owner'
+             ORDER BY r.name LIMIT 1",
+            params![business_id, username],
+            |row| {
+                Ok(AuthCredentials {
+                    user: AuthUser {
+                        id: row.get(0)?,
+                        business_id: row.get(1)?,
+                        username: row.get(2)?,
+                        full_name: row.get(3)?,
+                        role: row.get(4)?,
+                    },
+                    password_hash: row.get(5)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(result)
+}
+
+pub fn record_successful_login(conn: &Connection, user: &AuthUser) -> Result<(), DbError> {
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
+        "UPDATE users SET last_login_at = ?1
+         WHERE id = ?2 AND business_id = ?3 AND is_active = 1",
+        params![timestamp, user.id, user.business_id],
+    )?;
+    if updated != 1 {
+        return Err(DbError::InvalidInput(
+            "user account is inactive; sign in again".to_string(),
+        ));
+    }
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, created_at)
+         VALUES (?1, ?2, ?3, 'user_signed_in', 'user', ?3, ?4)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            user.business_id,
+            user.id,
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn list_businesses(conn: &Connection) -> Result<Vec<Business>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT id, name, tax_id, currency, timezone, date_format, language
@@ -350,6 +762,7 @@ pub fn list_businesses(conn: &Connection) -> Result<Vec<Business>, DbError> {
     Ok(businesses)
 }
 
+#[cfg(test)]
 pub fn create_business(
     conn: &Connection,
     name: &str,
@@ -4610,6 +5023,150 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn owner_bootstrap_is_atomic_business_scoped_and_audited() {
+        let conn = open_in_memory().unwrap();
+
+        assert!(auth_business_status(&conn).unwrap().is_empty());
+        let owner = bootstrap_owner(
+            &conn,
+            None,
+            Some("Hardware shop"),
+            "  OWNER.Admin  ",
+            "  Aline Uwase  ",
+            "$argon2id$test-hash",
+        )
+        .unwrap();
+
+        assert_eq!(owner.username, "owner.admin");
+        assert_eq!(owner.full_name, "Aline Uwase");
+        assert_eq!(owner.role, "owner");
+        assert_eq!(
+            auth_business_status(&conn).unwrap()[0].requires_owner_setup,
+            false
+        );
+        let credentials = auth_credentials(&conn, &owner.business_id, "OWNER.ADMIN")
+            .unwrap()
+            .unwrap();
+        assert_eq!(credentials.user, owner);
+        assert_eq!(credentials.password_hash, "$argon2id$test-hash");
+        assert!(matches!(
+            bootstrap_owner(
+                &conn,
+                Some(&owner.business_id),
+                None,
+                "second.owner",
+                "Second Owner",
+                "$argon2id$other"
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        record_successful_login(&conn, &owner).unwrap();
+        assert!(
+            auth_credentials(&conn, &owner.business_id, "missing")
+                .unwrap()
+                .is_none()
+        );
+        let audit_action: String = conn
+            .query_row(
+                "SELECT action FROM audit_logs WHERE entity_id = ?1",
+                params![owner.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_action, "owner_bootstrapped");
+        let last_login_at: Option<String> = conn
+            .query_row(
+                "SELECT last_login_at FROM users WHERE id = ?1",
+                params![owner.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(last_login_at.is_some());
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM audit_logs WHERE action = 'user_signed_in'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn authenticated_owner_can_create_another_business_with_the_same_login() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "First shop", None).unwrap();
+        let owner = bootstrap_owner(
+            &conn,
+            Some(&business.id),
+            None,
+            "owner",
+            "Aline Uwase",
+            "$argon2id$test-hash",
+        )
+        .unwrap();
+
+        let second_business =
+            create_business_for_owner(&conn, &owner, "Second shop", Some("TIN-123")).unwrap();
+        let second_owner = auth_credentials(&conn, &second_business.id, "owner")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(second_business.name, "Second shop");
+        assert_eq!(second_business.tax_id.as_deref(), Some("TIN-123"));
+        assert_eq!(second_owner.user.full_name, owner.full_name);
+        assert_eq!(second_owner.user.role, "owner");
+        assert_eq!(second_owner.password_hash, "$argon2id$test-hash");
+        let non_owner = AuthUser {
+            role: "cashier".to_string(),
+            ..owner
+        };
+        assert!(matches!(
+            create_business_for_owner(&conn, &non_owner, "Unauthorized shop", None),
+            Err(DbError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn authentication_session_is_required_and_scoped_to_its_business() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let owner = bootstrap_owner(
+            &conn,
+            Some(&business.id),
+            None,
+            "owner",
+            "Aline Uwase",
+            "$argon2id$test-hash",
+        )
+        .unwrap();
+        let state = DbState::new(conn);
+
+        assert!(matches!(
+            state.with_authenticated(|_, user| Ok(user.clone())),
+            Err(DbError::InvalidInput(_))
+        ));
+        state.set_session(owner.clone()).unwrap();
+        assert_eq!(
+            state
+                .with_business(&business.id, |_| Ok("authorized"))
+                .unwrap(),
+            "authorized"
+        );
+        assert!(state.with_business(&other_business.id, |_| Ok(())).is_err());
+        assert_eq!(
+            state
+                .with_authenticated(|_, user| Ok(user.id.clone()))
+                .unwrap(),
+            owner.id
+        );
+        state.clear_session().unwrap();
+        assert!(state.with_authenticated(|_, _| Ok(())).is_err());
     }
 
     #[test]

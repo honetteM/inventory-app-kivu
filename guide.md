@@ -603,7 +603,9 @@ The first reporting slice is a manually selected, business-scoped daily summary.
 
 Cash ledger migration 015 adds distinct cash, bank and MoMo accounts, immutable classified movements, and confirmed transfers that post paired source/destination movements. It distinguishes customer trade-debt repayments from business-loan movements. Existing financial records are intentionally not backfilled because their actual custody account, branch and responsible user are unknown.
 
-Posting existing sale, repayment, expense and supplier-payment flows into those accounts; account management UI; authenticated approvals; opening/closing balances and carry-forward; branch attribution; detailed adjustment reporting; and PDF export remain pending. Cash closing is deferred until authenticated user and permission enforcement exists. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
+Local owner sign-in now uses Argon2id password hashes and an in-memory session. The first owner can bootstrap a new or existing business; creating another business provisions the same owner credentials in that business. Application data commands require a signed-in owner and are scoped to that owner's selected business.
+
+Worker account management and granular role permissions; posting existing sale, repayment, expense and supplier-payment flows into cash accounts; account management UI; authenticated cash approvals; opening/closing balances and carry-forward; branch attribution; detailed adjustment reporting; and PDF export remain pending. Cash closing remains disabled until role-specific permission checks and the closing workflow are implemented. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
 
 ---
 
