@@ -1308,6 +1308,56 @@ pub fn set_employee_active(
     Ok(())
 }
 
+pub fn reset_employee_password(
+    conn: &Connection,
+    business_id: &str,
+    employee_id: &str,
+    password_hash: &str,
+    actor: &AuthUser,
+) -> Result<(), DbError> {
+    if actor.role != "owner" || actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "an owner signed in to this business is required".to_string(),
+        ));
+    }
+    if password_hash.trim().is_empty() {
+        return Err(DbError::InvalidInput(
+            "a valid password hash is required".to_string(),
+        ));
+    }
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
+        "UPDATE users SET password_hash = ?1, updated_at = ?2
+         WHERE id = ?3 AND business_id = ?4
+           AND EXISTS (
+               SELECT 1 FROM user_roles ur
+               JOIN roles r ON r.id = ur.role_id AND r.business_id = ?4
+               WHERE ur.user_id = users.id AND r.name = 'manager'
+           )",
+        params![password_hash, timestamp, employee_id, business_id],
+    )?;
+    if updated != 1 {
+        return Err(DbError::InvalidInput(
+            "Manager profile does not exist in this business".to_string(),
+        ));
+    }
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'manager_password_reset', 'user', ?4, 'password_changed', ?5)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            actor.id,
+            employee_id,
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn list_cash_accounts(
     conn: &Connection,
     business_id: &str,
@@ -7192,6 +7242,54 @@ mod tests {
             )
             .unwrap(),
             2
+        );
+        reset_employee_password(
+            &conn,
+            &business.id,
+            &employee.id,
+            "$argon2id$new-manager-hash",
+            &owner,
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT password_hash FROM users WHERE id = ?1",
+                params![employee.id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "$argon2id$new-manager-hash"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM audit_logs
+                 WHERE business_id = ?1 AND user_id = ?2
+                   AND action = 'manager_password_reset' AND entity_id = ?3",
+                params![business.id, owner.id, employee.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+        assert!(
+            reset_employee_password(
+                &conn,
+                &other_business.id,
+                &employee.id,
+                "$argon2id$wrong-business",
+                &owner,
+            )
+            .is_err()
+        );
+        assert!(
+            reset_employee_password(
+                &conn,
+                &business.id,
+                &owner.id,
+                "$argon2id$owner-target",
+                &owner,
+            )
+            .is_err()
         );
         assert!(set_employee_active(&conn, &business.id, &owner.id, false, &owner).is_err());
     }

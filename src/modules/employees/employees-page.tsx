@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { LoaderCircle, Plus, UserCog } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { KeyRound, LoaderCircle, Plus, UserCog } from "lucide-react";
+import { Fragment, useEffect, useState, type FormEvent } from "react";
 
 import { PageHeader } from "@/components/shared/page-header";
 import { Button } from "@/components/ui/button";
@@ -72,6 +72,9 @@ export function EmployeesPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [isSavingPermissions, setIsSavingPermissions] = useState(false);
   const [savingEmployeeId, setSavingEmployeeId] = useState<string | null>(null);
+  const [resetEmployeeId, setResetEmployeeId] = useState<string | null>(null);
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetPasswordConfirmation, setResetPasswordConfirmation] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -139,6 +142,35 @@ export function EmployeesPage() {
     }
   }
 
+  async function resetEmployeePassword(employee: Employee) {
+    setError(null);
+    setNotice(null);
+    if (resetPassword !== resetPasswordConfirmation) {
+      setError("Password confirmation does not match.");
+      return;
+    }
+    if (resetPassword.length < 12 || resetPassword.length > 128) {
+      setError("Password must be 12-128 characters long.");
+      return;
+    }
+    setSavingEmployeeId(employee.id);
+    try {
+      await invoke("employee_password_reset", {
+        businessId: user.business_id,
+        employeeId: employee.id,
+        password: resetPassword,
+      });
+      setResetEmployeeId(null);
+      setResetPassword("");
+      setResetPasswordConfirmation("");
+      setNotice(`${employee.full_name}'s password was reset and the action was recorded in the audit log.`);
+    } catch (cause) {
+      setError(`Could not reset ${employee.full_name}'s password. ${errorText(cause)}`);
+    } finally {
+      setSavingEmployeeId(null);
+    }
+  }
+
   async function setEmployeeActive(employee: Employee, isActive: boolean) {
     setError(null);
     setNotice(null);
@@ -162,6 +194,7 @@ export function EmployeesPage() {
     } finally {
       setSavingEmployeeId(null);
     }
+
   }
 
   async function saveManagerPermissions() {
@@ -368,30 +401,90 @@ export function EmployeesPage() {
           ) : (
             <div className="divide-y">
               {employees.map((employee) => (
-                <div key={employee.id} className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex min-w-0 items-start gap-3">
-                    <UserCog className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-                    <div className="min-w-0 space-y-1">
-                      <p className="truncate font-medium">{employee.full_name}</p>
-                      <p className="text-sm text-muted-foreground">
-                        @{employee.username} · {roleLabel(employee.role)}
-                      </p>
+                <Fragment key={employee.id}>
+                  <div className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex min-w-0 items-start gap-3">
+                      <UserCog className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                      <div className="min-w-0 space-y-1">
+                        <p className="truncate font-medium">{employee.full_name}</p>
+                        <p className="text-sm text-muted-foreground">
+                          @{employee.username} · {roleLabel(employee.role)}
+                        </p>
+                      </div>
+                      <Badge variant={employee.is_active ? "default" : "secondary"}>
+                        {employee.is_active ? "Active" : "Inactive"}
+                      </Badge>
                     </div>
-                    <Badge variant={employee.is_active ? "default" : "secondary"}>
-                      {employee.is_active ? "Active" : "Inactive"}
-                    </Badge>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={savingEmployeeId !== null}
+                      onClick={() => void setEmployeeActive(employee, !employee.is_active)}
+                    >
+                      {savingEmployeeId === employee.id ? <LoaderCircle className="animate-spin" /> : null}
+                      {employee.is_active ? "Deactivate" : "Activate"}
+                    </Button>
+                    {employee.role === "manager" ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={savingEmployeeId !== null}
+                        onClick={() => {
+                          setResetEmployeeId((current) => current === employee.id ? null : employee.id);
+                          setResetPassword("");
+                          setResetPasswordConfirmation("");
+                        }}
+                      >
+                        <KeyRound />
+                        Reset password
+                      </Button>
+                    ) : null}
                   </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    disabled={savingEmployeeId !== null}
-                    onClick={() => void setEmployeeActive(employee, !employee.is_active)}
-                  >
-                    {savingEmployeeId === employee.id ? <LoaderCircle className="animate-spin" /> : null}
-                    {employee.is_active ? "Deactivate" : "Activate"}
-                  </Button>
-                </div>
+                  {resetEmployeeId === employee.id ? (
+                    <form
+                      className="grid gap-3 rounded-lg border bg-muted/20 p-4 sm:grid-cols-[1fr_1fr_auto]"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void resetEmployeePassword(employee);
+                      }}
+                    >
+                      <div className="space-y-2">
+                        <Label htmlFor={`reset-password-${employee.id}`}>New password</Label>
+                        <Input
+                          id={`reset-password-${employee.id}`}
+                          type="password"
+                          autoComplete="new-password"
+                          minLength={12}
+                          maxLength={128}
+                          required
+                          value={resetPassword}
+                          onChange={(event) => setResetPassword(event.target.value)}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor={`reset-password-confirmation-${employee.id}`}>Confirm new password</Label>
+                        <Input
+                          id={`reset-password-confirmation-${employee.id}`}
+                          type="password"
+                          autoComplete="new-password"
+                          minLength={12}
+                          maxLength={128}
+                          required
+                          value={resetPasswordConfirmation}
+                          onChange={(event) => setResetPasswordConfirmation(event.target.value)}
+                        />
+                      </div>
+                      <div className="flex items-end">
+                        <Button type="submit" disabled={savingEmployeeId !== null}>
+                          {savingEmployeeId === employee.id ? <LoaderCircle className="animate-spin" /> : <KeyRound />}
+                          {savingEmployeeId === employee.id ? "Resetting..." : "Save password"}
+                        </Button>
+                      </div>
+                    </form>
+                  ) : null}
+                </Fragment>
               ))}
             </div>
           )}

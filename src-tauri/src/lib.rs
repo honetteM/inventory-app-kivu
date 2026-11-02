@@ -151,6 +151,28 @@ fn employee_set_active(
 }
 
 #[tauri::command]
+fn employee_password_reset(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    employee_id: String,
+    password: String,
+) -> Result<(), String> {
+    if password.chars().count() < 12 || password.chars().count() > 128 {
+        return Err("password must be 12-128 characters long".to_string());
+    }
+    let password_hash = hash_password(&password)?;
+    state
+        .with_business_permission(
+            &business_id,
+            db::PERMISSION_EMPLOYEES_MANAGE,
+            |conn, actor| {
+                db::reset_employee_password(conn, &business_id, &employee_id, &password_hash, actor)
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn manager_permission_list(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -1120,6 +1142,7 @@ pub fn run() {
             employee_list,
             employee_create,
             employee_set_active,
+            employee_password_reset,
             manager_permission_list,
             manager_permission_update,
             auth_logout,
