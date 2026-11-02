@@ -652,7 +652,7 @@ fn customer_statement(
     customer_id: String,
 ) -> Result<db::CustomerStatement, String> {
     state
-        .with_business_permission(&business_id, db::PERMISSION_FINANCE_READ, |conn, _| {
+        .with_business_permission(&business_id, db::PERMISSION_CUSTOMERS_READ, |conn, _| {
             db::customer_statement(conn, &business_id, &customer_id)
         })
         .map_err(|e| e.to_string())

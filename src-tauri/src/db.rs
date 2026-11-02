@@ -6245,11 +6245,15 @@ mod tests {
         let permissions = state.with_authenticated(list_user_permissions).unwrap();
         assert!(permissions.contains(&PERMISSION_CATALOG_MANAGE.to_string()));
         assert!(permissions.contains(&PERMISSION_PURCHASES_MANAGE.to_string()));
+        assert!(permissions.contains(&PERMISSION_CUSTOMERS_READ.to_string()));
         assert!(permissions.contains(&PERMISSION_CUSTOMER_PAYMENTS_MANAGE.to_string()));
         assert!(!permissions.contains(&PERMISSION_REPORTS_READ.to_string()));
         assert!(!permissions.contains(&PERMISSION_FINANCE_READ.to_string()));
         state
             .with_authorized(PERMISSION_CATALOG_MANAGE, |_, _| Ok(()))
+            .unwrap();
+        state
+            .with_authorized(PERMISSION_CUSTOMERS_READ, |_, _| Ok(()))
             .unwrap();
         assert!(
             state
