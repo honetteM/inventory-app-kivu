@@ -539,7 +539,10 @@ export function CustomersPage() {
         </>
       )}
       <Dialog open={statementCustomerId !== null} onOpenChange={closeStatement}>
-        <DialogContent className="max-h-[85vh] w-[calc(100vw-2rem)] max-w-4xl overflow-y-auto sm:max-w-4xl">
+        <DialogContent
+          size="wide"
+          className="max-h-[85vh] w-[calc(100vw-2rem)] overflow-y-auto"
+        >
           <DialogHeader>
             <DialogTitle>
               {statement?.customer.name ?? "Customer statement"}
