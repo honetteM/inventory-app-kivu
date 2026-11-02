@@ -440,6 +440,18 @@ pub struct CashAccount {
     pub updated_at: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct Employee {
+    pub id: String,
+    pub business_id: String,
+    pub username: String,
+    pub full_name: String,
+    pub role: String,
+    pub is_active: bool,
+    pub last_login_at: Option<String>,
+    pub created_at: String,
+}
+
 #[derive(Debug)]
 pub struct AuthCredentials {
     pub user: AuthUser,
@@ -768,6 +780,202 @@ pub fn record_successful_login(conn: &Connection, user: &AuthUser) -> Result<(),
             uuid::Uuid::new_v4().to_string(),
             user.business_id,
             user.id,
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn list_employees(conn: &Connection, business_id: &str) -> Result<Vec<Employee>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT u.id, u.business_id, u.username, u.full_name, r.name, u.is_active,
+                u.last_login_at, u.created_at
+         FROM users u
+         JOIN user_roles ur ON ur.user_id = u.id
+         JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
+         WHERE u.business_id = ?1 AND r.name IN ('manager', 'cashier')
+         ORDER BY u.is_active DESC, u.full_name COLLATE NOCASE",
+    )?;
+    let employees = stmt
+        .query_map(params![business_id], |row| {
+            Ok(Employee {
+                id: row.get(0)?,
+                business_id: row.get(1)?,
+                username: row.get(2)?,
+                full_name: row.get(3)?,
+                role: row.get(4)?,
+                is_active: row.get::<_, i64>(5)? != 0,
+                last_login_at: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(employees)
+}
+
+pub fn create_employee(
+    conn: &Connection,
+    business_id: &str,
+    actor: &AuthUser,
+    username: &str,
+    full_name: &str,
+    role: &str,
+    password_hash: &str,
+) -> Result<Employee, DbError> {
+    if actor.role != "owner" || actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "an owner signed in to this business is required".to_string(),
+        ));
+    }
+    if !matches!(role, "manager" | "cashier") {
+        return Err(DbError::InvalidInput(
+            "select a supported employee role".to_string(),
+        ));
+    }
+    if password_hash.trim().is_empty() {
+        return Err(DbError::InvalidInput(
+            "a valid password hash is required".to_string(),
+        ));
+    }
+    let (username, full_name) = validate_auth_identity(username, full_name)?;
+    let tx = conn.unchecked_transaction()?;
+    let timestamp = now_utc();
+    let role_id = uuid::Uuid::new_v4().to_string();
+    let display_name = if role == "manager" {
+        "Manager"
+    } else {
+        "Cashier"
+    };
+    tx.execute(
+        "INSERT INTO roles (id, business_id, name, display_name, is_system, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)
+         ON CONFLICT (business_id, name) DO NOTHING",
+        params![role_id, business_id, role, display_name, timestamp],
+    )?;
+    let role_id: String = tx.query_row(
+        "SELECT id FROM roles WHERE business_id = ?1 AND name = ?2",
+        params![business_id, role],
+        |row| row.get(0),
+    )?;
+    let user_id = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO users
+            (id, business_id, username, full_name, password_hash, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![
+            user_id,
+            business_id,
+            username,
+            full_name,
+            password_hash,
+            timestamp
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO user_roles (id, user_id, role_id, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            user_id,
+            role_id,
+            timestamp
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'employee_created', 'user', ?4, ?5, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            actor.id,
+            user_id,
+            format!("role={role}"),
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    list_employees(conn, business_id)?
+        .into_iter()
+        .find(|employee| employee.id == user_id)
+        .ok_or_else(|| DbError::InvalidInput("created employee could not be loaded".to_string()))
+}
+
+pub fn set_employee_active(
+    conn: &Connection,
+    business_id: &str,
+    employee_id: &str,
+    is_active: bool,
+    actor: &AuthUser,
+) -> Result<(), DbError> {
+    if actor.role != "owner" || actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "an owner signed in to this business is required".to_string(),
+        ));
+    }
+    if actor.id == employee_id {
+        return Err(DbError::InvalidInput(
+            "you cannot change your own account status here".to_string(),
+        ));
+    }
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
+        "UPDATE users SET is_active = ?1, updated_at = ?2
+         WHERE id = ?3 AND business_id = ?4 AND is_active != ?1
+           AND EXISTS (
+               SELECT 1 FROM user_roles ur
+               JOIN roles r ON r.id = ur.role_id AND r.business_id = ?4
+               WHERE ur.user_id = users.id AND r.name IN ('manager', 'cashier')
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM user_roles ur
+               JOIN roles r ON r.id = ur.role_id AND r.business_id = ?4
+               WHERE ur.user_id = users.id AND r.name = 'owner'
+           )",
+        params![i64::from(is_active), timestamp, employee_id, business_id],
+    )?;
+    if updated == 0 {
+        let is_employee: bool = tx.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM users u
+                JOIN user_roles ur ON ur.user_id = u.id
+                JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
+                WHERE u.id = ?1 AND u.business_id = ?2
+                  AND r.name IN ('manager', 'cashier')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM user_roles owner_ur
+                      JOIN roles owner_role ON owner_role.id = owner_ur.role_id
+                          AND owner_role.business_id = u.business_id
+                      WHERE owner_ur.user_id = u.id AND owner_role.name = 'owner'
+                  )
+            )",
+            params![employee_id, business_id],
+            |row| row.get(0),
+        )?;
+        if !is_employee {
+            return Err(DbError::InvalidInput(
+                "employee does not exist in this business".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'user', ?5, ?6, ?7)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            actor.id,
+            if is_active {
+                "employee_activated"
+            } else {
+                "employee_deactivated"
+            },
+            employee_id,
+            format!("is_active={is_active}"),
             timestamp
         ],
     )?;
@@ -5282,6 +5490,95 @@ mod tests {
             .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn employee_profiles_are_owner_created_audited_and_cannot_sign_in_yet() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let owner = bootstrap_owner(
+            &conn,
+            Some(&business.id),
+            None,
+            "owner",
+            "Aline Uwase",
+            "$argon2id$owner-hash",
+        )
+        .unwrap();
+
+        let employee = create_employee(
+            &conn,
+            &business.id,
+            &owner,
+            "  cashier.one ",
+            " Jean Niyonzima ",
+            "cashier",
+            "$argon2id$employee-hash",
+        )
+        .unwrap();
+        assert_eq!(employee.username, "cashier.one");
+        assert_eq!(employee.full_name, "Jean Niyonzima");
+        assert_eq!(employee.role, "cashier");
+        assert!(employee.is_active);
+        assert_eq!(
+            list_employees(&conn, &business.id)
+                .unwrap()
+                .iter()
+                .map(|listed| listed.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![employee.id.as_str()]
+        );
+        assert!(
+            list_employees(&conn, &other_business.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            auth_credentials(&conn, &business.id, &employee.username)
+                .unwrap()
+                .is_none(),
+            "employee sign-in remains disabled until role permissions are enforced"
+        );
+        assert!(matches!(
+            create_employee(
+                &conn,
+                &other_business.id,
+                &owner,
+                "manager.one",
+                "Manager",
+                "manager",
+                "$argon2id$manager-hash"
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_employee(
+                &conn,
+                &business.id,
+                &owner,
+                "owner.two",
+                "Invalid role",
+                "owner",
+                "$argon2id$invalid"
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
+
+        set_employee_active(&conn, &business.id, &employee.id, false, &owner).unwrap();
+        assert!(!list_employees(&conn, &business.id).unwrap()[0].is_active);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM audit_logs
+                 WHERE business_id = ?1 AND user_id = ?2
+                   AND action IN ('employee_created', 'employee_deactivated')",
+                params![business.id, owner.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2
+        );
+        assert!(set_employee_active(&conn, &business.id, &owner.id, false, &owner).is_err());
     }
 
     #[test]

@@ -607,7 +607,9 @@ The cash-account setup screen now lists, creates, activates and deactivates busi
 
 Local owner sign-in now uses Argon2id password hashes and an in-memory session. The first owner can bootstrap a new or existing business; creating another business provisions the same owner credentials in that business. Application data commands require a signed-in owner and are scoped to that owner's selected business.
 
-Worker account management and granular role permissions; posting existing sale, repayment, expense and supplier-payment flows into cash accounts; authenticated cash approvals; opening/closing balances and carry-forward; branch attribution; detailed adjustment reporting; and PDF export remain pending. Cash closing remains disabled until role-specific permission checks and the closing workflow are implemented. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
+The Employees screen allows an owner to create and deactivate/reactivate business-scoped Manager and Cashier profiles. Initial passwords are Argon2id-hashed, and profile creation/status changes are audit logged. Staff sign-in remains disabled until role-specific permissions are enforced on application commands; staff profiles currently do not grant application access.
+
+Granular role permissions and staff sign-in; posting existing sale, repayment, expense and supplier-payment flows into cash accounts; authenticated cash approvals; opening/closing balances and carry-forward; branch attribution; detailed adjustment reporting; and PDF export remain pending. Cash closing remains disabled until role-specific permission checks and the closing workflow are implemented. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
 
 ---
 

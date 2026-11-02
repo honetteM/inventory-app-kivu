@@ -89,6 +89,58 @@ fn auth_login(
 }
 
 #[tauri::command]
+fn employee_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::Employee>, String> {
+    state
+        .with_business(&business_id, |conn| db::list_employees(conn, &business_id))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn employee_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    username: String,
+    full_name: String,
+    role: String,
+    password: String,
+) -> Result<db::Employee, String> {
+    if password.chars().count() < 12 || password.chars().count() > 128 {
+        return Err("password must be 12-128 characters long".to_string());
+    }
+    let password_hash = hash_password(&password)?;
+    state
+        .with_authenticated(|conn, actor| {
+            db::create_employee(
+                conn,
+                &business_id,
+                actor,
+                &username,
+                &full_name,
+                &role,
+                &password_hash,
+            )
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn employee_set_active(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    employee_id: String,
+    is_active: bool,
+) -> Result<(), String> {
+    state
+        .with_authenticated(|conn, actor| {
+            db::set_employee_active(conn, &business_id, &employee_id, is_active, actor)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn auth_logout(state: tauri::State<db::DbState>) -> Result<(), String> {
     state.clear_session().map_err(|error| error.to_string())
 }
@@ -815,6 +867,9 @@ pub fn run() {
             auth_business_status,
             auth_bootstrap_owner,
             auth_login,
+            employee_list,
+            employee_create,
+            employee_set_active,
             auth_logout,
             auth_current_user,
             db_info,

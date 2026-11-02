@@ -13,6 +13,7 @@ import { PaymentsPage } from "@/modules/payments/payments-page";
 import { ExpensesPage } from "@/modules/expenses/expenses-page";
 import { ReportsPage } from "@/modules/reports/reports-page";
 import { CashAccountsPage } from "@/modules/cash-accounts/cash-accounts-page";
+import { EmployeesPage } from "@/modules/employees/employees-page";
 
 const placeholder = (title: string, description: string) => (
   <PagePlaceholder title={title} description={description} />
@@ -35,7 +36,7 @@ export const router = createBrowserRouter([
       { path: "payments", element: <PaymentsPage /> },
       { path: "cash-accounts", element: <CashAccountsPage /> },
       { path: "reports", element: <ReportsPage /> },
-      { path: "employees", element: placeholder("Employees", "Users, roles and permissions.") },
+      { path: "employees", element: <EmployeesPage /> },
       { path: "settings", element: <BusinessSetupPage /> },
     ],
   },
