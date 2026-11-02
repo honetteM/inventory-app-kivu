@@ -127,7 +127,7 @@ export function EmployeesPage() {
           Number(b.is_active) - Number(a.is_active) || a.full_name.localeCompare(b.full_name),
         ),
       );
-      setNotice("Manager profile created and audited. Employee sign-in is not enabled yet.");
+      setNotice("Manager profile created and audited. The Manager can now sign in with this username and password.");
     } catch (cause) {
       setError(`Could not create employee profile. ${errorText(cause)}`);
     } finally {
@@ -190,7 +190,7 @@ export function EmployeesPage() {
       />
 
       <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-sm text-foreground">
-        Manager permissions are enforced by the backend. Employee sign-in remains disabled until its authentication flow is implemented and tested.
+        Active Managers can sign in with their profile username and password. Their access is limited to the permissions configured above; Cashier sign-in is unavailable.
       </div>
 
       {error ? (
@@ -276,7 +276,7 @@ export function EmployeesPage() {
         <CardHeader>
           <CardTitle>Add an employee</CardTitle>
           <CardDescription>
-            Create a Manager profile with a unique username. Passwords are hashed on this device and are never displayed after creation.
+            Create a Manager profile with a unique sign-in username and initial password. Passwords are hashed on this device and are never displayed after creation.
           </CardDescription>
         </CardHeader>
         <CardContent>

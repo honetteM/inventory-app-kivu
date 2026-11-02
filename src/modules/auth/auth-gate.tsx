@@ -71,6 +71,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
         if (active) {
           setBusinesses(result);
           setBusinessId(result[0]?.id ?? "");
+          if (result.length === 0 || result[0]?.requires_owner_setup) {
+            setUsername("admin");
+            setFullName("Administrator");
+          }
         }
       } catch (cause) {
         if (active) {
@@ -167,11 +171,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
               {requiresOwnerSetup ? <UserRoundPlus className="size-5" /> : <KeyRound className="size-5" />}
             </div>
             <div className="space-y-1">
-              <CardTitle>{requiresOwnerSetup ? "Set up owner access" : "Sign in to your business"}</CardTitle>
+              <CardTitle>{requiresOwnerSetup ? "Set up Owner/Admin access" : "Sign in to your business"}</CardTitle>
               <CardDescription>
                 {requiresOwnerSetup
-                  ? "Create the first owner account. Passwords are securely hashed on this device."
-                  : "Sign in to access your business records on this device."}
+                  ? "Create the first Owner/Admin account. Choose a password; it is securely hashed on this device."
+                  : "Owners and active Managers can sign in with their business username and password."}
               </CardDescription>
             </div>
           </CardHeader>
@@ -200,7 +204,18 @@ export function AuthGate({ children }: { children: ReactNode }) {
                   <SelectField
                     id="auth-business"
                     value={businessId}
-                    onChange={(event) => setBusinessId(event.target.value)}
+                    onChange={(event) => {
+                      const selectedId = event.target.value;
+                      setBusinessId(selectedId);
+                      const selected = businesses.find((business) => business.id === selectedId);
+                      if (selected?.requires_owner_setup) {
+                        setUsername("admin");
+                        setFullName("Administrator");
+                      } else {
+                        setUsername("");
+                        setFullName("");
+                      }
+                    }}
                     required
                   >
                     {businesses.map((business) => (
@@ -211,7 +226,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
               )}
               {requiresOwnerSetup ? (
                 <div className="space-y-2">
-                  <Label htmlFor="auth-full-name">Owner full name</Label>
+                  <Label htmlFor="auth-full-name">Owner/Admin full name</Label>
                   <Input
                     id="auth-full-name"
                     autoComplete="name"
@@ -233,6 +248,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
                   value={username}
                   onChange={(event) => setUsername(event.target.value)}
                 />
+                {requiresOwnerSetup ? (
+                  <p className="text-xs text-muted-foreground">The default username is admin; you can change it before creating the account.</p>
+                ) : null}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="auth-password">Password</Label>
@@ -271,7 +289,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
                 disabled={isSaving || (!businessId && !isInitialBusinessSetup)}
               >
                 {isSaving ? <LoaderCircle className="animate-spin" /> : requiresOwnerSetup ? <Building2 /> : <LogIn />}
-                {isSaving ? "Please wait..." : requiresOwnerSetup ? "Create owner account" : "Sign in"}
+                {isSaving ? "Please wait..." : requiresOwnerSetup ? "Create Owner/Admin account" : "Sign in"}
               </Button>
             </form>
           </CardContent>

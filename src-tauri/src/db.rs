@@ -869,8 +869,9 @@ pub fn auth_credentials(
              JOIN user_roles ur ON ur.user_id = u.id
              JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
              WHERE u.business_id = ?1 AND u.username = ?2 AND u.is_active = 1
-               AND r.name = 'owner'
-             ORDER BY r.name LIMIT 1",
+               AND r.name IN ('owner', 'manager')
+             ORDER BY CASE r.name WHEN 'owner' THEN 0 ELSE 1 END
+             LIMIT 1",
             params![business_id, username],
             |row| {
                 Ok(AuthCredentials {
@@ -5852,7 +5853,7 @@ mod tests {
     }
 
     #[test]
-    fn employee_profiles_are_owner_created_audited_and_cannot_sign_in_yet() {
+    fn employee_profiles_are_owner_created_audited_and_manager_can_sign_in() {
         let conn = open_in_memory().unwrap();
         let business = create_business(&conn, "Hardware shop", None).unwrap();
         let other_business = create_business(&conn, "Other shop", None).unwrap();
@@ -5893,12 +5894,11 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(
-            auth_credentials(&conn, &business.id, &employee.username)
-                .unwrap()
-                .is_none(),
-            "employee sign-in remains disabled until the staff authentication flow is enabled"
-        );
+        let manager_credentials = auth_credentials(&conn, &business.id, &employee.username)
+            .unwrap()
+            .expect("active Manager profiles can sign in");
+        assert_eq!(manager_credentials.user.role, "manager");
+        assert_eq!(manager_credentials.password_hash, "$argon2id$employee-hash");
         assert!(matches!(
             create_employee(
                 &conn,
@@ -5926,6 +5926,12 @@ mod tests {
 
         set_employee_active(&conn, &business.id, &employee.id, false, &owner).unwrap();
         assert!(!list_employees(&conn, &business.id).unwrap()[0].is_active);
+        assert!(
+            auth_credentials(&conn, &business.id, &employee.username)
+                .unwrap()
+                .is_none(),
+            "deactivated Manager profiles cannot sign in"
+        );
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM audit_logs

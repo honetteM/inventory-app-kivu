@@ -605,9 +605,9 @@ Cash ledger migration 015 adds distinct cash, bank and MoMo accounts, immutable 
 
 The cash-account setup screen now lists, creates, activates and deactivates business-scoped cash drawers, bank accounts, MTN/Airtel wallets and other accounts. Cash drawers are assigned to the signed-in owner until employee accounts are available. Account changes are audit logged; deactivation preserves history. This setup does not yet post sales or payments, maintain balances, or enable transfers or closing.
 
-Local owner sign-in now uses Argon2id password hashes and an in-memory session. The first owner can bootstrap a new or existing business; creating another business provisions the same owner credentials in that business. Application data commands require a signed-in owner and are scoped to that owner's selected business.
+Local Owner/Admin sign-in uses Argon2id password hashes and an in-memory session. First-run setup pre-fills the username `admin` and requires the owner to choose a password; there is no shared default password. Creating another business provisions the same owner credentials in that business. Active Managers can also sign in using the username and password set on their profile. Manager and Owner/Admin data commands are scoped to the signed-in user's business and checked against their permissions.
 
-The Employees screen allows an owner to create Manager profiles and deactivate/reactivate existing staff profiles. Initial passwords are Argon2id-hashed, and profile creation/status changes are audit logged. Migrations 016-017 add the permission catalogue and grant all capabilities to Owner/Admin roles. Every business-scoped Tauri command checks its read/manage capability server-side. Owner/Admin access is full and cannot be restricted from the Employees screen. Owners can configure a restricted allowlist of Manager permissions; new and existing Manager roles receive the documented safe defaults. Cashier permissions cannot be configured and Cashier roles receive no capabilities. Manager grants are enforced in backend commands. Staff sign-in remains disabled until its authentication flow is implemented and tested.
+The Employees screen allows an owner to create Manager profiles and deactivate/reactivate existing staff profiles. Initial passwords are Argon2id-hashed, and profile creation/status changes are audit logged. Migrations 016-017 add the permission catalogue and grant all capabilities to Owner/Admin roles. Every business-scoped Tauri command checks its read/manage capability server-side. Owner/Admin access is full and cannot be restricted from the Employees screen. Owners can configure a restricted allowlist of Manager permissions; new and existing Manager roles receive the documented safe defaults. Active Managers can sign in; Cashier permissions cannot be configured and Cashier roles receive no capabilities or sign-in access. Email-based sign-in/account updates and staff password reset remain future work.
 
 Staff sign-in; posting existing sale, repayment, expense and supplier-payment flows into cash accounts; authenticated cash approvals; opening/closing balances and carry-forward; branch attribution; detailed adjustment reporting; and PDF export remain pending. Cash closing remains disabled until its workflow is implemented. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
 
@@ -641,7 +641,7 @@ Full access:
 - Cashier permissions are not configurable and Cashier roles receive no permissions.
 - Manager permission changes are audited and enforced by backend commands.
 
-Employee sign-in is not enabled. Existing employee profiles do not currently provide application access.
+Active Manager profiles can sign in using the username and password set by Owner/Admin. Inactive profiles and Cashier profiles cannot sign in.
 
 Every important action must record the authenticated user.
 
