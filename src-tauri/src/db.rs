@@ -3661,6 +3661,236 @@ pub struct SaleReceipt {
     pub payments: Vec<SalePaymentReceipt>,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct SaleHistoryItem {
+    pub product_name: String,
+    pub sku: String,
+    pub quantity: i64,
+    pub unit_name: String,
+    pub unit_price: i64,
+    pub line_total: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SaleHistoryPayment {
+    pub payment_method: String,
+    pub amount: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SaleHistoryEntry {
+    pub id: String,
+    pub transaction_number: String,
+    pub status: String,
+    pub customer_name: Option<String>,
+    pub sold_by: Option<String>,
+    pub subtotal: i64,
+    pub discount: i64,
+    pub total: i64,
+    pub amount_paid: i64,
+    pub balance_due: i64,
+    pub item_quantity: i64,
+    pub created_at: String,
+    pub items: Vec<SaleHistoryItem>,
+    pub payments: Vec<SaleHistoryPayment>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SaleHistoryPage {
+    pub items: Vec<SaleHistoryEntry>,
+    pub total_count: i64,
+    pub completed_sales_total: i64,
+    pub collected_at_sale_total: i64,
+}
+
+pub fn list_sales(
+    conn: &Connection,
+    business_id: &str,
+    search: Option<&str>,
+    from_date: Option<&str>,
+    to_date: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> Result<SaleHistoryPage, DbError> {
+    if offset < 0 || !(1..=100).contains(&limit) {
+        return Err(DbError::InvalidInput(
+            "sales pagination must use a non-negative offset and a limit from 1 to 100".to_string(),
+        ));
+    }
+    for date in [from_date, to_date].into_iter().flatten() {
+        let parsed = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .map_err(|_| DbError::InvalidInput("enter a valid sales date".to_string()))?;
+        if parsed.format("%Y-%m-%d").to_string() != date {
+            return Err(DbError::InvalidInput(
+                "enter a valid sales date".to_string(),
+            ));
+        }
+    }
+    if matches!((from_date, to_date), (Some(from), Some(to)) if from > to) {
+        return Err(DbError::InvalidInput(
+            "sales start date cannot be after its end date".to_string(),
+        ));
+    }
+
+    let pattern = search
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            format!(
+                "%{}%",
+                value
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            )
+        });
+    let filter = "s.business_id = ?1
+        AND (?2 IS NULL OR
+             s.transaction_number LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+             COALESCE(c.name, '') LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
+             EXISTS (
+                 SELECT 1 FROM sale_items si
+                 WHERE si.sale_id = s.id AND si.business_id = s.business_id
+                   AND (si.product_name LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+                        OR si.sku LIKE ?2 ESCAPE '\\' COLLATE NOCASE)
+             ))
+        AND (?3 IS NULL OR substr(s.created_at, 1, 10) >= ?3)
+        AND (?4 IS NULL OR substr(s.created_at, 1, 10) <= ?4)";
+    let total_count: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM sales s
+             LEFT JOIN customers c ON c.id = s.customer_id AND c.business_id = s.business_id
+             WHERE {filter}"
+        ),
+        params![business_id, pattern, from_date, to_date],
+        |row| row.get(0),
+    )?;
+    let (completed_sales_total, collected_at_sale_total): (i64, i64) = conn.query_row(
+        &format!(
+            "SELECT COALESCE(SUM(CASE WHEN s.status = 'completed' THEN s.total ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN s.status = 'completed' THEN
+                        (SELECT COALESCE(SUM(sp.amount), 0) FROM sale_payments sp
+                         WHERE sp.sale_id = s.id)
+                        ELSE 0 END), 0)
+             FROM sales s
+             LEFT JOIN customers c ON c.id = s.customer_id AND c.business_id = s.business_id
+             WHERE {filter}"
+        ),
+        params![business_id, pattern, from_date, to_date],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT s.id, s.transaction_number, s.status, c.name, u.full_name,
+                s.subtotal, s.discount, s.total,
+                COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp
+                          WHERE sp.sale_id = s.id), 0), s.created_at
+         FROM sales s
+         LEFT JOIN customers c ON c.id = s.customer_id AND c.business_id = s.business_id
+         LEFT JOIN users u ON u.id = s.sold_by AND u.business_id = s.business_id
+         WHERE {filter}
+         ORDER BY s.created_at DESC, s.id DESC
+         LIMIT ?5 OFFSET ?6"
+    ))?;
+    let rows = stmt
+        .query_map(
+            params![business_id, pattern, from_date, to_date, limit, offset],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    let mut item_stmt = conn.prepare(
+        "SELECT product_name, sku, quantity, unit_name, unit_price, line_total
+         FROM sale_items WHERE sale_id = ?1 ORDER BY id",
+    )?;
+    let mut payment_stmt = conn.prepare(
+        "SELECT payment_method, amount
+         FROM sale_payments WHERE sale_id = ?1 ORDER BY created_at, id",
+    )?;
+    let mut quantity_stmt =
+        conn.prepare("SELECT COALESCE(SUM(quantity), 0) FROM sale_items WHERE sale_id = ?1")?;
+    for (
+        id,
+        transaction_number,
+        status,
+        customer_name,
+        sold_by,
+        subtotal,
+        discount,
+        total,
+        amount_paid,
+        created_at,
+    ) in rows
+    {
+        let sale_items = item_stmt
+            .query_map(params![id], |row| {
+                Ok(SaleHistoryItem {
+                    product_name: row.get(0)?,
+                    sku: row.get(1)?,
+                    quantity: row.get(2)?,
+                    unit_name: row.get(3)?,
+                    unit_price: row.get(4)?,
+                    line_total: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let payments = payment_stmt
+            .query_map(params![id], |row| {
+                Ok(SaleHistoryPayment {
+                    payment_method: row.get(0)?,
+                    amount: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let balance_due = total
+            .checked_sub(amount_paid)
+            .filter(|balance| *balance >= 0)
+            .ok_or_else(|| {
+                DbError::InvalidInput(format!(
+                    "recorded sale payments exceed the total for {transaction_number}"
+                ))
+            })?;
+        let item_quantity: i64 = quantity_stmt.query_row(params![id], |row| row.get(0))?;
+        items.push(SaleHistoryEntry {
+            id,
+            transaction_number,
+            status,
+            customer_name,
+            sold_by,
+            subtotal,
+            discount,
+            total,
+            amount_paid,
+            balance_due,
+            item_quantity,
+            created_at,
+            items: sale_items,
+            payments,
+        });
+    }
+
+    Ok(SaleHistoryPage {
+        items,
+        total_count,
+        completed_sales_total,
+        collected_at_sale_total,
+    })
+}
+
 struct SaleLine {
     id: String,
     product_id: String,
@@ -4012,13 +4242,14 @@ fn checkout_sale_core(
     tx.execute(
         "INSERT INTO sales
             (id, business_id, transaction_number, status, subtotal, discount, total,
-             customer_id, created_at)
-         VALUES (?1, ?2, ?3, 'completed', ?4, 0, ?4, ?5, ?6)",
+             sold_by, customer_id, created_at)
+         VALUES (?1, ?2, ?3, 'completed', ?4, 0, ?4, ?5, ?6, ?7)",
         params![
             sale_id,
             business_id,
             transaction_number,
             total,
+            actor.id,
             customer_id,
             timestamp
         ],
@@ -9094,6 +9325,121 @@ mod tests {
                 receipt.id
             )
         );
+    }
+
+    #[test]
+    fn sales_history_is_scoped_searchable_paginated_and_uses_sale_snapshots() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let product = create_test_product(&conn, &business.id, "HISTORY-SKU-01");
+        let other_product = create_test_product(&conn, &other_business.id, "HISTORY-SKU-02");
+        set_opening_stock(&conn, &business.id, &product.id, 3_000, None).unwrap();
+        set_opening_stock(&conn, &other_business.id, &other_product.id, 1_000, None).unwrap();
+        update_base_selling_price(&conn, &business.id, &product.id, 10_000).unwrap();
+        update_base_selling_price(&conn, &other_business.id, &other_product.id, 10_000).unwrap();
+        let sale_item = |product_id: &str| SaleItemInput {
+            product_id: product_id.to_string(),
+            quantity: 1_000,
+            selling_price: None,
+            price_change_reason: None,
+        };
+        let sale = checkout_sale_with_payments(
+            &conn,
+            &business.id,
+            &[sale_item(&product.id)],
+            None,
+            &[
+                SalePaymentInput {
+                    payment_method: "cash".to_string(),
+                    amount: 6_000,
+                    account_id: String::new(),
+                },
+                SalePaymentInput {
+                    payment_method: "mtn_mobile_money".to_string(),
+                    amount: 4_000,
+                    account_id: String::new(),
+                },
+            ],
+        )
+        .unwrap();
+        checkout_sale(&conn, &business.id, &[sale_item(&product.id)], "cash").unwrap();
+        checkout_sale(
+            &conn,
+            &other_business.id,
+            &[sale_item(&other_product.id)],
+            "cash",
+        )
+        .unwrap();
+
+        let date = sale.created_at[..10].to_string();
+        let first_page =
+            list_sales(&conn, &business.id, None, Some(&date), Some(&date), 0, 1).unwrap();
+        assert_eq!(first_page.total_count, 2);
+        assert_eq!(first_page.completed_sales_total, 20_000);
+        assert_eq!(first_page.collected_at_sale_total, 20_000);
+        assert_eq!(first_page.items.len(), 1);
+        assert_eq!(first_page.items[0].total, 10_000);
+        assert_eq!(first_page.items[0].amount_paid, 10_000);
+        assert_eq!(first_page.items[0].balance_due, 0);
+        assert_eq!(first_page.items[0].item_quantity, 1_000);
+        assert_eq!(first_page.items[0].sold_by.as_deref(), Some("Test Owner"));
+        assert_eq!(first_page.items[0].items[0].product_name, product.name);
+
+        let matched = list_sales(
+            &conn,
+            &business.id,
+            Some("history-sku-01"),
+            Some(&date),
+            Some(&date),
+            0,
+            20,
+        )
+        .unwrap();
+        assert_eq!(matched.total_count, 2);
+        assert_eq!(matched.completed_sales_total, 20_000);
+        assert_eq!(matched.collected_at_sale_total, 20_000);
+        let split_sale = matched
+            .items
+            .iter()
+            .find(|entry| entry.id == sale.id)
+            .unwrap();
+        assert_eq!(split_sale.payments.len(), 2);
+        assert_eq!(
+            split_sale
+                .payments
+                .iter()
+                .map(|payment| payment.amount)
+                .sum::<i64>(),
+            split_sale.total
+        );
+        let unmatched = list_sales(
+            &conn,
+            &business.id,
+            Some("HISTORY-SKU-02"),
+            None,
+            None,
+            0,
+            20,
+        )
+        .unwrap();
+        assert_eq!(unmatched.total_count, 0);
+        assert!(matches!(
+            list_sales(&conn, &business.id, None, None, None, -1, 20),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            list_sales(
+                &conn,
+                &business.id,
+                None,
+                Some("2026-11-03"),
+                Some("2026-11-02"),
+                0,
+                20
+            ),
+            Err(DbError::InvalidInput(_))
+        ));
     }
 
     #[test]

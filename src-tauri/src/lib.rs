@@ -748,6 +748,31 @@ fn pos_checkout(
 }
 
 #[tauri::command]
+fn sales_history_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    search: Option<String>,
+    from_date: Option<String>,
+    to_date: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<db::SaleHistoryPage, String> {
+    state
+        .with_business_permission(&business_id, db::PERMISSION_SALES_READ, |conn, _| {
+            db::list_sales(
+                conn,
+                &business_id,
+                search.as_deref(),
+                from_date.as_deref(),
+                to_date.as_deref(),
+                offset,
+                limit,
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn customer_debt_list(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -1112,6 +1137,7 @@ pub fn run() {
             product_list,
             pos_product_search,
             pos_checkout,
+            sales_history_list,
             product_create,
             product_selling_price_update,
             product_unit_list,

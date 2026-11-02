@@ -1,9 +1,9 @@
 import { createBrowserRouter } from "react-router-dom";
 import { AppLayout } from "../layouts/app-layout";
-import { PagePlaceholder } from "@/components/shared/page-placeholder";
 import { DashboardPage } from "@/modules/dashboard/dashboard-page";
 import { InventoryPage } from "@/modules/inventory/inventory-page";
 import { PosPage } from "@/modules/pos/pos-page";
+import { SalesHistoryPage } from "@/modules/sales/sales-history-page";
 import { PurchasesPage } from "@/modules/purchases/purchases-page";
 import { ProductsPage } from "@/modules/products/products-page";
 import { BusinessSetupPage } from "@/modules/settings/business-setup-page";
@@ -15,10 +15,6 @@ import { ReportsPage } from "@/modules/reports/reports-page";
 import { CashAccountsPage } from "@/modules/cash-accounts/cash-accounts-page";
 import { EmployeesPage } from "@/modules/employees/employees-page";
 
-const placeholder = (title: string, description: string) => (
-  <PagePlaceholder title={title} description={description} />
-);
-
 export const router = createBrowserRouter([
   {
     path: "/",
@@ -29,7 +25,7 @@ export const router = createBrowserRouter([
       { path: "products", element: <ProductsPage /> },
       { path: "inventory", element: <InventoryPage /> },
       { path: "purchases", element: <PurchasesPage /> },
-      { path: "sales", element: placeholder("Sales History", "Completed transactions and returns.") },
+      { path: "sales", element: <SalesHistoryPage /> },
       { path: "customers", element: <CustomersPage /> },
       { path: "suppliers", element: <SuppliersPage /> },
       { path: "expenses", element: <ExpensesPage /> },
