@@ -603,9 +603,11 @@ The first reporting slice is a manually selected, business-scoped daily summary.
 
 Cash ledger migration 015 adds distinct cash, bank and MoMo accounts, immutable classified movements, and confirmed transfers that post paired source/destination movements. It distinguishes customer trade-debt repayments from business-loan movements. Existing financial records are intentionally not backfilled because their actual custody account, branch and responsible user are unknown.
 
+The cash-account setup screen now lists, creates, activates and deactivates business-scoped cash drawers, bank accounts, MTN/Airtel wallets and other accounts. Cash drawers are assigned to the signed-in owner until employee accounts are available. Account changes are audit logged; deactivation preserves history. This setup does not yet post sales or payments, maintain balances, or enable transfers or closing.
+
 Local owner sign-in now uses Argon2id password hashes and an in-memory session. The first owner can bootstrap a new or existing business; creating another business provisions the same owner credentials in that business. Application data commands require a signed-in owner and are scoped to that owner's selected business.
 
-Worker account management and granular role permissions; posting existing sale, repayment, expense and supplier-payment flows into cash accounts; account management UI; authenticated cash approvals; opening/closing balances and carry-forward; branch attribution; detailed adjustment reporting; and PDF export remain pending. Cash closing remains disabled until role-specific permission checks and the closing workflow are implemented. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
+Worker account management and granular role permissions; posting existing sale, repayment, expense and supplier-payment flows into cash accounts; authenticated cash approvals; opening/closing balances and carry-forward; branch attribution; detailed adjustment reporting; and PDF export remain pending. Cash closing remains disabled until role-specific permission checks and the closing workflow are implemented. Timestamp-based report activity currently follows the computer's local timezone; applying each business's configured timezone is also pending.
 
 ---
 

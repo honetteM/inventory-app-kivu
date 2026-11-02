@@ -133,6 +133,46 @@ fn business_create(
 }
 
 #[tauri::command]
+fn cash_account_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::CashAccount>, String> {
+    state
+        .with_business(&business_id, |conn| {
+            db::list_cash_accounts(conn, &business_id)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cash_account_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    account_type: String,
+    name: String,
+) -> Result<db::CashAccount, String> {
+    state
+        .with_authenticated(|conn, user| {
+            db::create_cash_account(conn, &business_id, user, &account_type, &name)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cash_account_set_active(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    account_id: String,
+    is_active: bool,
+) -> Result<(), String> {
+    state
+        .with_authenticated(|conn, user| {
+            db::set_cash_account_active(conn, &business_id, &account_id, is_active, user)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn category_list(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -780,6 +820,9 @@ pub fn run() {
             db_info,
             business_list,
             business_create,
+            cash_account_list,
+            cash_account_create,
+            cash_account_set_active,
             category_list,
             category_create,
             unit_list,

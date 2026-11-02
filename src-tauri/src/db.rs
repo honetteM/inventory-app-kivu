@@ -427,6 +427,19 @@ pub struct AuthBusinessStatus {
     pub requires_owner_setup: bool,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct CashAccount {
+    pub id: String,
+    pub business_id: String,
+    pub account_type: String,
+    pub name: String,
+    pub responsible_user_id: Option<String>,
+    pub responsible_name: Option<String>,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug)]
 pub struct AuthCredentials {
     pub user: AuthUser,
@@ -755,6 +768,160 @@ pub fn record_successful_login(conn: &Connection, user: &AuthUser) -> Result<(),
             uuid::Uuid::new_v4().to_string(),
             user.business_id,
             user.id,
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn list_cash_accounts(
+    conn: &Connection,
+    business_id: &str,
+) -> Result<Vec<CashAccount>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT a.id, a.business_id, a.account_type, a.name, a.responsible_user_id,
+                u.full_name, a.is_active, a.created_at, a.updated_at
+         FROM cash_accounts a
+         LEFT JOIN users u ON u.id = a.responsible_user_id
+             AND u.business_id = a.business_id
+         WHERE a.business_id = ?1
+         ORDER BY a.is_active DESC, a.account_type, a.name COLLATE NOCASE",
+    )?;
+    let accounts = stmt
+        .query_map(params![business_id], |row| {
+            Ok(CashAccount {
+                id: row.get(0)?,
+                business_id: row.get(1)?,
+                account_type: row.get(2)?,
+                name: row.get(3)?,
+                responsible_user_id: row.get(4)?,
+                responsible_name: row.get(5)?,
+                is_active: row.get::<_, i64>(6)? != 0,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(accounts)
+}
+
+pub fn create_cash_account(
+    conn: &Connection,
+    business_id: &str,
+    responsible_user: &AuthUser,
+    account_type: &str,
+    name: &str,
+) -> Result<CashAccount, DbError> {
+    if !matches!(
+        account_type,
+        "cash_drawer" | "bank" | "mtn_wallet" | "airtel_wallet" | "other"
+    ) {
+        return Err(DbError::InvalidInput(
+            "select a supported cash account type".to_string(),
+        ));
+    }
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err(DbError::InvalidInput(
+            "account name is required and must be 120 characters or fewer".to_string(),
+        ));
+    }
+    if responsible_user.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "you are not signed in to this business".to_string(),
+        ));
+    }
+
+    let account_id = uuid::Uuid::new_v4().to_string();
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO cash_accounts
+            (id, business_id, account_type, name, responsible_user_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![
+            account_id,
+            business_id,
+            account_type,
+            name,
+            if account_type == "cash_drawer" {
+                Some(responsible_user.id.as_str())
+            } else {
+                None
+            },
+            timestamp
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'cash_account_created', 'cash_account', ?4, ?5, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            responsible_user.id,
+            account_id,
+            account_type,
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    list_cash_accounts(conn, business_id)?
+        .into_iter()
+        .find(|account| account.id == account_id)
+        .ok_or_else(|| {
+            DbError::InvalidInput("created cash account could not be loaded".to_string())
+        })
+}
+
+pub fn set_cash_account_active(
+    conn: &Connection,
+    business_id: &str,
+    account_id: &str,
+    is_active: bool,
+    actor: &AuthUser,
+) -> Result<(), DbError> {
+    if actor.business_id != business_id {
+        return Err(DbError::InvalidInput(
+            "you are not signed in to this business".to_string(),
+        ));
+    }
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
+        "UPDATE cash_accounts SET is_active = ?1, updated_at = ?2
+         WHERE id = ?3 AND business_id = ?4 AND is_active != ?1",
+        params![i64::from(is_active), timestamp, account_id, business_id],
+    )?;
+    if updated == 0 {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cash_accounts WHERE id = ?1 AND business_id = ?2)",
+            params![account_id, business_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(DbError::InvalidInput(
+                "cash account does not exist in this business".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'cash_account', ?5, ?6, ?7)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            business_id,
+            actor.id,
+            if is_active {
+                "cash_account_activated"
+            } else {
+                "cash_account_deactivated"
+            },
+            account_id,
+            format!("is_active={is_active}"),
             timestamp
         ],
     )?;
@@ -5243,6 +5410,83 @@ mod tests {
                 .get::<_, i64>(0))
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn cash_account_management_scopes_accounts_assigns_cash_drawer_and_audits_status() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Hardware shop", None).unwrap();
+        let other_business = create_business(&conn, "Other shop", None).unwrap();
+        let owner = bootstrap_owner(
+            &conn,
+            Some(&business.id),
+            None,
+            "owner",
+            "Aline Uwase",
+            "$argon2id$test-hash",
+        )
+        .unwrap();
+
+        let drawer = create_cash_account(
+            &conn,
+            &business.id,
+            &owner,
+            "cash_drawer",
+            " Front counter ",
+        )
+        .unwrap();
+        assert_eq!(drawer.name, "Front counter");
+        assert_eq!(
+            drawer.responsible_user_id.as_deref(),
+            Some(owner.id.as_str())
+        );
+        assert_eq!(drawer.responsible_name.as_deref(), Some("Aline Uwase"));
+
+        let bank = create_cash_account(&conn, &business.id, &owner, "bank", "Shop bank").unwrap();
+        assert_eq!(bank.responsible_user_id, None);
+        assert!(
+            list_cash_accounts(&conn, &other_business.id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            create_cash_account(&conn, &business.id, &owner, "unsupported", "Invalid"),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            create_cash_account(&conn, &other_business.id, &owner, "bank", "Wrong business"),
+            Err(DbError::InvalidInput(_))
+        ));
+
+        set_cash_account_active(&conn, &business.id, &drawer.id, false, &owner).unwrap();
+        let listed = list_cash_accounts(&conn, &business.id).unwrap();
+        assert!(
+            !listed
+                .iter()
+                .find(|account| account.id == drawer.id)
+                .unwrap()
+                .is_active
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM audit_logs
+                 WHERE business_id = ?1 AND user_id = ?2
+                   AND action IN ('cash_account_created', 'cash_account_deactivated')",
+                params![business.id, owner.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            3
+        );
+        set_cash_account_active(&conn, &business.id, &drawer.id, true, &owner).unwrap();
+        assert!(
+            list_cash_accounts(&conn, &business.id)
+                .unwrap()
+                .iter()
+                .find(|account| account.id == drawer.id)
+                .unwrap()
+                .is_active
         );
     }
 
