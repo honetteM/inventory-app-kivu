@@ -25,6 +25,7 @@ interface Customer {
   address: string | null;
   customer_type: CustomerType;
   credit_limit: number;
+  outstanding_balance: number;
   is_active: boolean;
 }
 
@@ -429,6 +430,9 @@ export function CustomersPage() {
                           ) : null}
                           <p className="text-sm text-muted-foreground">
                             Credit limit: {formatMoney(customer.credit_limit)}
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            Outstanding balance: {formatMoney(customer.outstanding_balance)}
                           </p>
                         </div>
                         <Button

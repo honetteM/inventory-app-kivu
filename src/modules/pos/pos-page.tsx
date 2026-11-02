@@ -20,6 +20,12 @@ interface Business {
   name: string;
 }
 
+function moneyInputValueFromBigInt(scaledAmount: bigint): string {
+  const whole = scaledAmount / MONEY_SCALE;
+  const fraction = scaledAmount % MONEY_SCALE;
+  return fraction === 0n ? whole.toString() : `${whole}.${fraction.toString().padStart(2, "0")}`;
+}
+
 type PaymentMethod = "cash" | "mtn_mobile_money" | "airtel_money" | "bank_transfer";
 
 const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
@@ -28,6 +34,25 @@ const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
   { value: "airtel_money", label: "Airtel Money" },
   { value: "bank_transfer", label: "Bank transfer" },
 ];
+
+interface Customer {
+  id: string;
+  name: string;
+  phone: string | null;
+  credit_limit: number;
+  outstanding_balance: number;
+  is_active: boolean;
+}
+
+interface PaymentLine {
+  id: string;
+  method: PaymentMethod;
+  amount: string;
+}
+
+function newPaymentLine(): PaymentLine {
+  return { id: crypto.randomUUID(), method: "cash", amount: "" };
+}
 
 function formatScaledQuantity(scaled: bigint): string {
   const whole = scaled / QUANTITY_SCALE;
@@ -66,9 +91,13 @@ interface CartItem {
 interface SaleReceipt {
   id: string;
   transaction_number: string;
-  payment_method: PaymentMethod;
+  payment_method: string;
   total: number;
+  amount_paid: number;
+  balance_due: number;
+  customer_name: string | null;
   created_at: string;
+  payments: { payment_method: PaymentMethod; amount: number }[];
   items: {
     product_name: string;
     sku: string;
@@ -160,9 +189,12 @@ export function PosPage() {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [cart, setCart] = useState<CartItem[]>([]);
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cash");
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [customerId, setCustomerId] = useState("");
+  const [paymentLines, setPaymentLines] = useState<PaymentLine[]>([newPaymentLine()]);
   const [completedSale, setCompletedSale] = useState<SaleReceipt | null>(null);
   const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
+  const [isLoadingCustomers, setIsLoadingCustomers] = useState(false);
   const [isLoadingProducts, setIsLoadingProducts] = useState(false);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const [refreshToken, setRefreshToken] = useState(0);
@@ -212,6 +244,41 @@ export function PosPage() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!businessId) {
+      setCustomers([]);
+      return;
+    }
+
+    let active = true;
+    setIsLoadingCustomers(true);
+    invoke<Customer[]>("customer_list", { businessId })
+      .then((result) => {
+        if (active) {
+          setCustomers(result);
+          setCustomerId((current) =>
+            result.some((customer) => customer.id === current && customer.is_active)
+              ? current
+              : "",
+          );
+        }
+      })
+      .catch((cause: unknown) => {
+        if (active) {
+          setError(`Could not load customers. ${errorText(cause)}`);
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setIsLoadingCustomers(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [businessId]);
 
   useEffect(() => {
     if (!businessId) {
@@ -309,6 +376,27 @@ export function PosPage() {
     setCart((current) => current.filter((item) => item.product.id !== productId));
   }
 
+  function addPaymentLine() {
+    setPaymentLines((current) => {
+      if (current.length === 0) {
+        return [newPaymentLine()];
+      }
+      if (current.length === 1 && current[0].amount === "") {
+        return [
+          { ...current[0], amount: moneyInputValueFromBigInt(cartTotal) },
+          newPaymentLine(),
+        ];
+      }
+      return [...current, newPaymentLine()];
+    });
+  }
+
+  function updatePaymentLine(id: string, patch: Partial<Pick<PaymentLine, "method" | "amount">>) {
+    setPaymentLines((current) =>
+      current.map((payment) => payment.id === id ? { ...payment, ...patch } : payment),
+    );
+  }
+
   async function handleCheckout() {
     if (!businessId || cart.length === 0 || hasInvalidCartItem || isCheckingOut) {
       return;
@@ -344,16 +432,66 @@ export function PosPage() {
       });
     }
 
+    const payments: { paymentMethod: PaymentMethod; amount: number }[] = [];
+    let amountPaid = 0n;
+    for (const payment of paymentLines) {
+      if (!payment.amount.trim() && paymentLines.length > 1) {
+        setError("Enter an amount for each payment method, or remove the unused payment line.");
+        return;
+      }
+      const amount = payment.amount.trim() ? parseMoney(payment.amount) : cartTotal;
+      if (amount === null || (payment.amount.trim() && amount <= 0n)) {
+        setError("Enter a valid payment amount greater than zero, or remove that payment line.");
+        return;
+      }
+      if (amount === 0n) {
+        continue;
+      }
+      if (amount > MAX_SAFE_INTEGER) {
+        setError("Payment amount exceeds the supported range.");
+        return;
+      }
+      amountPaid += amount;
+      if (amountPaid > MAX_SAFE_INTEGER) {
+        setError("Total payments exceed the supported range.");
+        return;
+      }
+      if (payments.length >= 10) {
+        setError("A sale can have no more than 10 payment entries.");
+        return;
+      }
+      payments.push({ paymentMethod: payment.method, amount: Number(amount) });
+    }
+    if (amountPaid > cartTotal) {
+      setError("Payments cannot exceed the sale total.");
+      return;
+    }
+    if (amountPaid < cartTotal && !customerId) {
+      setError("Select a customer to record the unpaid balance as credit.");
+      return;
+    }
+
     setError(null);
     setIsCheckingOut(true);
     try {
       const receipt = await invoke<SaleReceipt>("pos_checkout", {
         businessId,
         items,
-        paymentMethod,
+        customerId: customerId || null,
+        payments,
       });
       setCompletedSale(receipt);
+      if (customerId && receipt.balance_due > 0) {
+        setCustomers((current) =>
+          current.map((customer) =>
+            customer.id === customerId
+              ? { ...customer, outstanding_balance: customer.outstanding_balance + receipt.balance_due }
+              : customer,
+          ),
+        );
+      }
       setCart([]);
+      setPaymentLines([newPaymentLine()]);
       setRefreshToken((current) => current + 1);
     } catch (cause) {
       const message = errorText(cause);
@@ -388,6 +526,8 @@ export function PosPage() {
               setPage(0);
               setCart([]);
               setCompletedSale(null);
+              setCustomerId("");
+              setPaymentLines([newPaymentLine()]);
             }}
           >
             {businesses.map((business) => (
@@ -464,10 +604,31 @@ export function PosPage() {
               ))}
             </div>
             <div className="flex justify-between gap-4">
-              <span className="text-muted-foreground">
-                Paid by {PAYMENT_METHODS.find((method) => method.value === completedSale.payment_method)?.label}
-              </span>
+              <span className="text-muted-foreground">Sale total</span>
               <span className="font-semibold">{formatProductPrice(completedSale.total)}</span>
+            </div>
+            {completedSale.customer_name ? (
+              <p className="text-sm text-muted-foreground">Customer: {completedSale.customer_name}</p>
+            ) : null}
+            <div className="space-y-1 border-t pt-3 text-sm">
+              {completedSale.payments.map((payment, index) => (
+                <div key={`${payment.payment_method}-${index}`} className="flex justify-between gap-4">
+                  <span className="text-muted-foreground">
+                    Paid by {PAYMENT_METHODS.find((method) => method.value === payment.payment_method)?.label}
+                  </span>
+                  <span>{formatProductPrice(payment.amount)}</span>
+                </div>
+              ))}
+              <div className="flex justify-between gap-4 font-medium">
+                <span>Paid</span>
+                <span>{formatProductPrice(completedSale.amount_paid)}</span>
+              </div>
+              {completedSale.balance_due > 0 ? (
+                <div className="flex justify-between gap-4 font-semibold text-amber-800">
+                  <span>Customer balance due</span>
+                  <span>{formatProductPrice(completedSale.balance_due)}</span>
+                </div>
+              ) : null}
             </div>
             <p className="text-xs text-muted-foreground">
               Ordinary sales receipt; this is not a certified EBM tax invoice.
@@ -660,25 +821,104 @@ export function PosPage() {
                 <span>{hasInvalidCartItem ? "—" : formatMoney(cartTotal)}</span>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="pos-payment-method">Payment method</Label>
+                <Label htmlFor="pos-customer">Customer</Label>
                 <SelectField
-                  id="pos-payment-method"
-                  value={paymentMethod}
-                  onChange={(event) => {
-                    const selected = PAYMENT_METHODS.find((method) => method.value === event.target.value);
-                    if (selected) {
-                      setPaymentMethod(selected.value);
-                    }
-                  }}
+                  id="pos-customer"
+                  value={customerId}
+                  disabled={isLoadingCustomers}
+                  onChange={(event) => setCustomerId(event.target.value)}
                 >
-                  {PAYMENT_METHODS.map((method) => (
-                    <option key={method.value} value={method.value}>{method.label}</option>
+                  <option value="">
+                    {isLoadingCustomers ? "Loading customers..." : "Walk-in customer"}
+                  </option>
+                  {customers.filter((customer) => customer.is_active).map((customer) => (
+                    <option key={customer.id} value={customer.id}>
+                      {customer.name}{customer.phone ? ` · ${customer.phone}` : ""}
+                    </option>
                   ))}
                 </SelectField>
+                {customerId ? (() => {
+                  const customer = customers.find((item) => item.id === customerId);
+                  if (!customer) {
+                    return null;
+                  }
+                  const available = Math.max(0, customer.credit_limit - customer.outstanding_balance);
+                  return (
+                    <p className="text-xs text-muted-foreground">
+                      Credit available: {formatProductPrice(available)} · Current balance: {formatProductPrice(customer.outstanding_balance)}
+                    </p>
+                  );
+                })() : null}
               </div>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <Label>Payments received</Label>
+                  <Button type="button" size="sm" variant="outline" onClick={addPaymentLine}>
+                    <Plus />
+                    Add payment
+                  </Button>
+                </div>
+                {paymentLines.length === 0 ? (
+                  <p className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                    No payment received. The full sale total will be recorded as customer credit.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {paymentLines.map((payment, index) => (
+                      <div key={payment.id} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2">
+                        <div className="space-y-1">
+                          <Label htmlFor={`pos-payment-method-${payment.id}`} className="text-xs">Method {index + 1}</Label>
+                          <SelectField
+                            id={`pos-payment-method-${payment.id}`}
+                            value={payment.method}
+                            onChange={(event) => {
+                              const selected = PAYMENT_METHODS.find((method) => method.value === event.target.value);
+                              if (selected) {
+                                updatePaymentLine(payment.id, { method: selected.value });
+                              }
+                            }}
+                          >
+                            {PAYMENT_METHODS.map((method) => (
+                              <option key={method.value} value={method.value}>{method.label}</option>
+                            ))}
+                          </SelectField>
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor={`pos-payment-amount-${payment.id}`} className="text-xs">Amount (RWF)</Label>
+                          <Input
+                            id={`pos-payment-amount-${payment.id}`}
+                            type="number"
+                            min="0.01"
+                            step="0.01"
+                            placeholder={paymentLines.length === 1 ? formatMoney(cartTotal) : "0"}
+                            value={payment.amount}
+                            onChange={(event) => updatePaymentLine(payment.id, { amount: event.target.value })}
+                          />
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Remove payment ${index + 1}`}
+                          onClick={() => setPaymentLines((current) =>
+                            current.filter((item) => item.id !== payment.id),
+                          )}
+                        >
+                          <Trash2 />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              {customerId && paymentLines.length > 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  Any unpaid amount will be recorded as customer credit, subject to the customer&apos;s credit limit.
+                </p>
+              ) : null}
               <Button
                 className="w-full"
-                disabled={cart.length === 0 || hasInvalidCartItem || isCheckingOut}
+                disabled={cart.length === 0 || hasInvalidCartItem || isCheckingOut || isLoadingCustomers}
                 onClick={handleCheckout}
               >
                 {isCheckingOut ? <LoaderCircle className="animate-spin" /> : <ShoppingCart />}

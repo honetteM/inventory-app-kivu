@@ -342,10 +342,44 @@ fn pos_checkout(
     state: tauri::State<db::DbState>,
     business_id: String,
     items: Vec<db::SaleItemInput>,
-    payment_method: String,
+    customer_id: Option<String>,
+    payments: Vec<db::SalePaymentInput>,
 ) -> Result<db::SaleReceipt, String> {
     state
-        .with(|conn| db::checkout_sale(conn, &business_id, &items, &payment_method))
+        .with(|conn| {
+            db::checkout_sale_with_payments(
+                conn,
+                &business_id,
+                &items,
+                customer_id.as_deref(),
+                &payments,
+            )
+        })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn customer_debt_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::CustomerDebt>, String> {
+    state
+        .with(|conn| db::list_customer_debts(conn, &business_id))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn customer_debt_record_payment(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    debt_id: String,
+    payment_method: String,
+    amount: i64,
+) -> Result<db::CustomerDebtPayment, String> {
+    state
+        .with(|conn| {
+            db::record_customer_debt_payment(conn, &business_id, &debt_id, &payment_method, amount)
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -557,6 +591,8 @@ pub fn run() {
             customer_list,
             customer_create,
             customer_update,
+            customer_debt_list,
+            customer_debt_record_payment,
             purchase_product_list,
             purchase_list,
             purchase_create,
