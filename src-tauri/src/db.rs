@@ -86,6 +86,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "018_manager_operational_access",
         include_str!("../migrations/018_manager_operational_access.sql"),
     ),
+    (
+        19,
+        "019_expense_and_balance_permissions",
+        include_str!("../migrations/019_expense_and_balance_permissions.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -122,8 +127,11 @@ pub const PERMISSION_SALES_READ: &str = "sales.read";
 pub const PERMISSION_SALES_MANAGE: &str = "sales.manage";
 pub const PERMISSION_PURCHASES_READ: &str = "purchases.read";
 pub const PERMISSION_PURCHASES_MANAGE: &str = "purchases.manage";
-pub const PERMISSION_FINANCE_READ: &str = "finance.read";
-pub const PERMISSION_FINANCE_MANAGE: &str = "finance.manage";
+pub const PERMISSION_EXPENSES_READ: &str = "expenses.read";
+pub const PERMISSION_EXPENSES_MANAGE: &str = "expenses.manage";
+// Reserved until verified account balances are available to payment flows.
+#[allow(dead_code)]
+pub const PERMISSION_CASH_ACCOUNT_BALANCE_READ: &str = "cash_accounts.balance.read";
 pub const PERMISSION_REPORTS_READ: &str = "reports.read";
 pub const PERMISSION_ROLES_MANAGE: &str = "roles.manage";
 
@@ -5779,6 +5787,9 @@ mod tests {
 
         require_permission(&conn, &owner, PERMISSION_REPORTS_READ).unwrap();
         require_permission(&conn, &owner, PERMISSION_CASH_ACCOUNTS_MANAGE).unwrap();
+        require_permission(&conn, &owner, PERMISSION_EXPENSES_READ).unwrap();
+        require_permission(&conn, &owner, PERMISSION_EXPENSES_MANAGE).unwrap();
+        require_permission(&conn, &owner, PERMISSION_CASH_ACCOUNT_BALANCE_READ).unwrap();
         require_permission(&conn, &manager, PERMISSION_INVENTORY_MANAGE).unwrap();
         require_permission(&conn, &manager, PERMISSION_CATALOG_MANAGE).unwrap();
         require_permission(&conn, &manager, PERMISSION_SALES_READ).unwrap();
@@ -5787,13 +5798,35 @@ mod tests {
             Err(DbError::InvalidInput(_))
         ));
         assert!(matches!(
-            require_permission(&conn, &manager, PERMISSION_FINANCE_READ),
+            require_permission(&conn, &manager, "finance.read"),
             Err(DbError::InvalidInput(_))
         ));
         assert!(matches!(
             require_permission(&conn, &manager, PERMISSION_CASH_ACCOUNTS_MANAGE),
             Err(DbError::InvalidInput(_))
         ));
+        assert!(matches!(
+            require_permission(&conn, &manager, PERMISSION_EXPENSES_READ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            require_permission(&conn, &manager, PERMISSION_EXPENSES_MANAGE),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            require_permission(&conn, &manager, PERMISSION_CASH_ACCOUNT_BALANCE_READ),
+            Err(DbError::InvalidInput(_))
+        ));
+        assert!(
+            list_manager_permissions(&conn, &business.id)
+                .unwrap()
+                .iter()
+                .all(|setting| {
+                    setting.permission_id != PERMISSION_EXPENSES_READ
+                        && setting.permission_id != PERMISSION_EXPENSES_MANAGE
+                        && setting.permission_id != PERMISSION_CASH_ACCOUNT_BALANCE_READ
+                })
+        );
         let cashier_permissions: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM role_permissions WHERE role_id = ?1",
@@ -6248,7 +6281,10 @@ mod tests {
         assert!(permissions.contains(&PERMISSION_CUSTOMERS_READ.to_string()));
         assert!(permissions.contains(&PERMISSION_CUSTOMER_PAYMENTS_MANAGE.to_string()));
         assert!(!permissions.contains(&PERMISSION_REPORTS_READ.to_string()));
-        assert!(!permissions.contains(&PERMISSION_FINANCE_READ.to_string()));
+        assert!(!permissions.contains(&"finance.read".to_string()));
+        assert!(!permissions.contains(&PERMISSION_EXPENSES_READ.to_string()));
+        assert!(!permissions.contains(&PERMISSION_EXPENSES_MANAGE.to_string()));
+        assert!(!permissions.contains(&PERMISSION_CASH_ACCOUNT_BALANCE_READ.to_string()));
         state
             .with_authorized(PERMISSION_CATALOG_MANAGE, |_, _| Ok(()))
             .unwrap();

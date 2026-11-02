@@ -666,7 +666,7 @@ fn expense_list(
     limit: i64,
 ) -> Result<db::ExpensePage, String> {
     state
-        .with_business_permission(&business_id, db::PERMISSION_FINANCE_READ, |conn, _| {
+        .with_business_permission(&business_id, db::PERMISSION_EXPENSES_READ, |conn, _| {
             db::list_expenses(conn, &business_id, offset, limit)
         })
         .map_err(|e| e.to_string())
@@ -697,7 +697,7 @@ fn expense_create(
     responsible_name: String,
 ) -> Result<db::Expense, String> {
     state
-        .with_business_permission(&business_id, db::PERMISSION_FINANCE_MANAGE, |conn, _| {
+        .with_business_permission(&business_id, db::PERMISSION_EXPENSES_MANAGE, |conn, _| {
             db::create_expense(
                 conn,
                 &business_id,
