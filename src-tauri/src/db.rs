@@ -4637,7 +4637,16 @@ fn load_purchase(
 pub fn list_purchases(conn: &Connection, business_id: &str) -> Result<Vec<Purchase>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT id FROM purchases
-         WHERE business_id = ?1 AND status != 'received'
+         WHERE business_id = ?1
+           AND (
+               status != 'received'
+               OR COALESCE(
+                   (SELECT SUM(pp.amount) FROM purchase_payments pp
+                    WHERE pp.business_id = purchases.business_id
+                      AND pp.purchase_id = purchases.id),
+                   0
+               ) < subtotal
+           )
          ORDER BY created_at DESC, id LIMIT 200",
     )?;
     let purchase_ids = stmt
@@ -4700,6 +4709,11 @@ pub fn list_purchase_history(
             )
         });
     let filter = "p.business_id = ?1 AND p.status = 'received'
+        AND COALESCE(
+            (SELECT SUM(pp.amount) FROM purchase_payments pp
+             WHERE pp.business_id = p.business_id AND pp.purchase_id = p.id),
+            0
+        ) >= p.subtotal
         AND (?2 IS NULL OR
              s.name LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
              p.supplier_invoice_number LIKE ?2 ESCAPE '\\' COLLATE NOCASE OR
@@ -10828,13 +10842,43 @@ mod tests {
                 .all(|item| item.received_quantity == item.ordered_quantity)
         );
         assert_eq!(updated.deliveries.len(), 2);
+        assert_eq!(list_purchases(&conn, &business.id).unwrap().len(), 1);
+        assert_eq!(
+            list_purchase_history(&conn, &business.id, None, None, None, 0, 20)
+                .unwrap()
+                .total_count,
+            0
+        );
+        let owner = bootstrap_owner(
+            &conn,
+            Some(&business.id),
+            None,
+            "history.owner",
+            "History Owner",
+            "test-password-hash",
+        )
+        .unwrap();
+        let account =
+            create_cash_account(&conn, &business.id, &owner, "cash_drawer", "History drawer")
+                .unwrap();
+        create_cash_account_opening(&conn, &business.id, &account.id, 190_000, &owner).unwrap();
+        record_purchase_payment_as_user(
+            &conn,
+            &business.id,
+            &purchase.id,
+            190_000,
+            "cash",
+            &account.id,
+            &owner,
+        )
+        .unwrap();
         assert!(list_purchases(&conn, &business.id).unwrap().is_empty());
         let history =
             list_purchase_history(&conn, &business.id, Some("DN-01"), None, None, 0, 20).unwrap();
         assert_eq!(history.total_count, 1);
         assert_eq!(history.purchase_total, 190_000);
-        assert_eq!(history.paid_total, 0);
-        assert_eq!(history.balance_due_total, 190_000);
+        assert_eq!(history.paid_total, 190_000);
+        assert_eq!(history.balance_due_total, 0);
         assert_eq!(
             history.items[0]
                 .items

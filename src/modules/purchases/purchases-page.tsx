@@ -765,7 +765,7 @@ export function PurchasesPage() {
                 </Button>
               </div>
               <p className="text-sm text-muted-foreground">
-                Unfinished invoices remain here until all ordered goods are received. Fully received purchases are in Purchase History.
+                Invoices remain here until all goods are received and the supplier balance is fully paid. Completed purchases are in Purchase History.
               </p>
             </div>
             {isLoadingData ? (
