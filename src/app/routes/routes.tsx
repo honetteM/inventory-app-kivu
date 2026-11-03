@@ -15,8 +15,10 @@ import { ExpensesPage } from "@/modules/expenses/expenses-page";
 import { ReportsPage } from "@/modules/reports/reports-page";
 import { CashAccountsPage } from "@/modules/cash-accounts/cash-accounts-page";
 import { EmployeesPage } from "@/modules/employees/employees-page";
+import { DailyReportPrintPage } from "@/modules/reports/daily-report-print-page";
 
 export const router = createBrowserRouter([
+  { path: "/reports/daily/print", element: <DailyReportPrintPage /> },
   {
     path: "/",
     element: <AppLayout />,

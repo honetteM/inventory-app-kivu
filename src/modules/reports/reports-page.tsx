@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { Download, LoaderCircle, Printer, WalletCards } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { PageHeader } from "@/components/shared/page-header";
 import { SelectField } from "@/components/shared/select-field";
@@ -120,6 +121,7 @@ function BreakdownTable({ title, description, items }: {
 }
 
 export function ReportsPage() {
+  const navigate = useNavigate();
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessId, setBusinessId] = useState("");
   const [reportDate, setReportDate] = useState(localDate);
@@ -180,8 +182,8 @@ export function ReportsPage() {
               <p className="text-sm text-muted-foreground">{dateLabel}</p>
             </div>
             <div className="flex gap-2 print:hidden">
-              <Button variant="outline" onClick={() => window.print()}><Printer />Print</Button>
-              <Button onClick={() => window.print()}><Download />Export PDF</Button>
+              <Button variant="outline" onClick={() => navigate(`/reports/daily/print?businessId=${encodeURIComponent(businessId)}&date=${encodeURIComponent(reportDate)}`)}><Printer />Printable view</Button>
+              <Button onClick={() => navigate(`/reports/daily/print?businessId=${encodeURIComponent(businessId)}&date=${encodeURIComponent(reportDate)}`)}><Download />Export PDF</Button>
             </div>
           </header>
 
