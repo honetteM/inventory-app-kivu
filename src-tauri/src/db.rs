@@ -3204,6 +3204,13 @@ pub struct DailyCountBreakdown {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct DailyCashOutflowBreakdown {
+    pub category: String,
+    pub description: String,
+    pub amount: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct DailyBusinessReport {
     pub business_name: String,
     pub report_date: String,
@@ -3215,6 +3222,7 @@ pub struct DailyBusinessReport {
     pub cash_transferred_to_bank: i64,
     pub cash_transferred_to_mobile_money: i64,
     pub other_verified_cash_outflows: i64,
+    pub other_cash_outflows: Vec<DailyCashOutflowBreakdown>,
     pub physical_closing_cash: i64,
     pub loan_received: i64,
     pub loan_repayments: i64,
@@ -3328,6 +3336,45 @@ pub fn daily_business_report(
     let other_verified_cash_outflows = cash_movement_sum(
         "m.direction = 'out' AND m.movement_type NOT IN ('expense_payment', 'transfer_out')",
     )?;
+    let mut outflow_stmt = conn.prepare(
+        "SELECT
+            CASE m.movement_type
+                WHEN 'supplier_payment' THEN 'Supplier payment'
+                WHEN 'loan_repayment' THEN 'Loan repayment'
+                WHEN 'other_payment' THEN 'Other payment'
+                ELSE 'Other cash outflow'
+            END,
+            CASE
+                WHEN m.movement_type = 'supplier_payment'
+                    THEN 'Invoice ' || COALESCE(p.supplier_invoice_number, 'unknown')
+                WHEN m.description IS NOT NULL AND trim(m.description) != ''
+                    THEN trim(m.description)
+                WHEN m.movement_type = 'loan_repayment' THEN 'Loan repayment'
+                WHEN m.movement_type = 'other_payment' THEN 'Other payment'
+                ELSE 'Verified cash outflow'
+            END,
+            m.amount
+         FROM cash_movements m
+         JOIN cash_accounts a ON a.id = m.account_id AND a.business_id = m.business_id
+         LEFT JOIN purchase_payments pp
+            ON pp.id = m.source_id AND pp.business_id = m.business_id
+         LEFT JOIN purchases p
+            ON p.id = pp.purchase_id AND p.business_id = m.business_id
+         WHERE m.business_id = ?1 AND a.account_type = 'cash_drawer'
+           AND date(m.occurred_at, 'localtime') = ?2
+           AND m.direction = 'out'
+           AND m.movement_type NOT IN ('expense_payment', 'transfer_out')
+         ORDER BY m.occurred_at, m.id",
+    )?;
+    let other_cash_outflows = outflow_stmt
+        .query_map(params![business_id, report_date], |row| {
+            Ok(DailyCashOutflowBreakdown {
+                category: row.get(0)?,
+                description: row.get(1)?,
+                amount: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     let physical_closing_cash: i64 = conn.query_row(
         "SELECT COALESCE(SUM(
             o.opening_amount + COALESCE((
@@ -3546,6 +3593,7 @@ pub fn daily_business_report(
         cash_transferred_to_bank,
         cash_transferred_to_mobile_money,
         other_verified_cash_outflows,
+        other_cash_outflows,
         physical_closing_cash,
         loan_received,
         loan_repayments,

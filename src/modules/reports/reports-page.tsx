@@ -21,6 +21,12 @@ interface AmountBreakdown {
   amount: number;
 }
 
+interface CashOutflowBreakdown {
+  category: string;
+  description: string;
+  amount: number;
+}
+
 interface CountBreakdown {
   movement_type: string;
   count: number;
@@ -36,7 +42,7 @@ interface DailyBusinessReport {
   cash_expenses: number;
   cash_transferred_to_bank: number;
   cash_transferred_to_mobile_money: number;
-  other_verified_cash_outflows: number;
+  other_cash_outflows: CashOutflowBreakdown[];
   physical_closing_cash: number;
   loan_received: number;
   loan_repayments: number;
@@ -196,9 +202,6 @@ export function ReportsPage() {
 
           <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <SummaryCard title="Opening physical cash" value={formatMoney(report.opening_physical_cash)} detail="Carried from the previous day" />
-            <SummaryCard title="Cash received" value={formatMoney(report.cash_received)} detail="Cash drawer inflows excluding transfers" />
-            <SummaryCard title="Cash expenses" value={formatMoney(report.cash_expenses)} detail="Expenses paid from the drawer" />
-            <SummaryCard title="Cash sent out" value={formatMoney(report.cash_transferred_to_bank + report.cash_transferred_to_mobile_money + report.other_verified_cash_outflows)} detail="Bank, Mobile Money, and other verified outflows" />
           </section>
 
           <section className="grid gap-6 xl:grid-cols-2">
@@ -218,9 +221,9 @@ export function ReportsPage() {
                 <tr className="border-b"><td className="py-2">Opening physical cash</td><td className="data-number py-2 text-right">{formatMoney(report.opening_physical_cash)}</td></tr>
                 <tr className="border-b"><td className="py-2">+ Cash received</td><td className="data-number py-2 text-right">{formatMoney(report.cash_received)}</td></tr>
                 <tr className="border-b"><td className="py-2">− Cash expenses</td><td className="data-number py-2 text-right">{formatMoney(report.cash_expenses)}</td></tr>
-                <tr className="border-b"><td className="py-2">− Transferred to bank</td><td className="data-number py-2 text-right">{formatMoney(report.cash_transferred_to_bank)}</td></tr>
-                <tr className="border-b"><td className="py-2">− Transferred to Mobile Money</td><td className="data-number py-2 text-right">{formatMoney(report.cash_transferred_to_mobile_money)}</td></tr>
-                <tr className="border-b"><td className="py-2">− Other verified cash outflows</td><td className="data-number py-2 text-right">{formatMoney(report.other_verified_cash_outflows)}</td></tr>
+                <tr className="border-b"><td className="py-2">− Bank</td><td className="data-number py-2 text-right">{formatMoney(report.cash_transferred_to_bank)}</td></tr>
+                <tr className="border-b"><td className="py-2">− MOMO</td><td className="data-number py-2 text-right">{formatMoney(report.cash_transferred_to_mobile_money)}</td></tr>
+                {report.other_cash_outflows.map((outflow, index) => <tr className="border-b" key={`${outflow.category}-${outflow.description}-${index}`}><td className="py-2">− {outflow.category} — {outflow.description}</td><td className="data-number py-2 text-right">{formatMoney(outflow.amount)}</td></tr>)}
                 <tr className="font-semibold"><td className="pt-3">Physical closing cash</td><td className="data-number pt-3 text-right">{formatMoney(report.physical_closing_cash)}</td></tr>
               </tbody></table>
             </CardContent>

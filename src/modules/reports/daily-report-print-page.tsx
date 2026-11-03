@@ -12,6 +12,12 @@ interface AmountBreakdown {
   amount: number;
 }
 
+interface CashOutflowBreakdown {
+  category: string;
+  description: string;
+  amount: number;
+}
+
 interface DailyBusinessReport {
   business_name: string;
   report_date: string;
@@ -22,7 +28,7 @@ interface DailyBusinessReport {
   cash_expenses: number;
   cash_transferred_to_bank: number;
   cash_transferred_to_mobile_money: number;
-  other_verified_cash_outflows: number;
+  other_cash_outflows: CashOutflowBreakdown[];
   physical_closing_cash: number;
   loan_received: number;
   loan_repayments: number;
@@ -169,9 +175,12 @@ export function DailyReportPrintPage() {
             ["Opening physical cash", report.opening_physical_cash],
             ["Cash received", report.cash_received],
             ["Cash expenses paid", -report.cash_expenses],
-            ["Transferred to bank", -report.cash_transferred_to_bank],
-            ["Transferred to Mobile Money", -report.cash_transferred_to_mobile_money],
-            ["Other verified cash outflows", -report.other_verified_cash_outflows],
+            ["Bank", -report.cash_transferred_to_bank],
+            ["MOMO", -report.cash_transferred_to_mobile_money],
+            ...report.other_cash_outflows.map((outflow) => [
+              `${outflow.category} — ${outflow.description}`,
+              -outflow.amount,
+            ] as [string, number]),
           ]} />
           <p className="print-report-total print-report-total-emphasis"><span>Physical closing cash</span><strong>{formatMoney(report.physical_closing_cash)}</strong></p>
         </section>
