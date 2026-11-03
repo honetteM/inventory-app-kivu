@@ -194,3 +194,30 @@ body {
     scrollbar-width: thin;
   }
 }
+
+@media print {
+  body {
+    background: white;
+    color: black;
+  }
+
+  .daily-report {
+    padding: 0;
+  }
+
+  .report-paper {
+    max-width: none;
+  }
+
+  .report-paper > * {
+    break-inside: avoid;
+  }
+
+  .report-paper table {
+    break-inside: auto;
+  }
+
+  .report-paper tr {
+    break-inside: avoid;
+  }
+}

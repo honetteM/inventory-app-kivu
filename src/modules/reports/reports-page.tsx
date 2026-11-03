@@ -1,10 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import { Download, LoaderCircle, Printer, WalletCards } from "lucide-react";
 import { useEffect, useState } from "react";
-import { BarChart3, CircleDollarSign, LoaderCircle, Package, ReceiptText, ShoppingBag, Wallet } from "lucide-react";
 
 import { PageHeader } from "@/components/shared/page-header";
 import { SelectField } from "@/components/shared/select-field";
-import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
@@ -28,6 +28,18 @@ interface CountBreakdown {
 interface DailyBusinessReport {
   business_name: string;
   report_date: string;
+  money_received: number;
+  net_position: number;
+  opening_physical_cash: number;
+  cash_received: number;
+  cash_expenses: number;
+  cash_transferred_to_bank: number;
+  cash_transferred_to_mobile_money: number;
+  other_verified_cash_outflows: number;
+  physical_closing_cash: number;
+  loan_received: number;
+  loan_repayments: number;
+  other_receipts: number;
   sale_count: number;
   sales_total: number;
   sales_by_payment_method: AmountBreakdown[];
@@ -53,9 +65,7 @@ function localDate(): string {
 }
 
 function formatMoney(value: number): string {
-  if (!Number.isSafeInteger(value)) {
-    return "—";
-  }
+  if (!Number.isSafeInteger(value)) return "—";
   const amount = BigInt(value);
   const absoluteAmount = amount < 0n ? -amount : amount;
   const whole = absoluteAmount / MONEY_SCALE;
@@ -65,88 +75,45 @@ function formatMoney(value: number): string {
   } RWF`;
 }
 
-function paymentMethodLabel(method: string): string {
-  const labels: Record<string, string> = {
-    cash: "Cash",
-    mtn_mobile_money: "MTN Mobile Money",
-    airtel_money: "Airtel Money",
-    bank_transfer: "Bank transfer",
-  };
-  return labels[method] ?? method;
-}
-
-function categoryLabel(category: string): string {
-  return category
-    .split("_")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
+function label(value: string): string {
+  return value.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
 }
 
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-function SummaryCard({
-  label,
-  value,
-  detail,
-  icon: Icon,
-  emphasis = false,
-}: {
-  label: string;
+function SummaryCard({ title, value, detail, positive }: {
+  title: string;
   value: string;
   detail: string;
-  icon: typeof CircleDollarSign;
-  emphasis?: boolean;
+  positive?: boolean;
 }) {
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardDescription>{label}</CardDescription>
-        <Icon className="size-4 text-muted-foreground" />
-      </CardHeader>
+      <CardHeader className="pb-2"><CardDescription>{title}</CardDescription></CardHeader>
       <CardContent>
-        <p className={`data-number text-xl font-semibold tracking-tight sm:text-2xl ${emphasis ? "text-primary" : ""}`}>
-          {value}
-        </p>
+        <p className={`data-number text-xl font-semibold ${positive === true ? "text-emerald-700" : positive === false ? "text-destructive" : ""}`}>{value}</p>
         <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
       </CardContent>
     </Card>
   );
 }
 
-function BreakdownList({
-  title,
-  description,
-  items,
-  emptyText,
-  formatLabel = categoryLabel,
-}: {
+function BreakdownTable({ title, description, items }: {
   title: string;
   description: string;
   items: AmountBreakdown[];
-  emptyText: string;
-  formatLabel?: (category: string) => string;
 }) {
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        <CardDescription>{description}</CardDescription>
-      </CardHeader>
+      <CardHeader><CardTitle>{title}</CardTitle><CardDescription>{description}</CardDescription></CardHeader>
       <CardContent>
         {items.length ? (
-          <ul className="divide-y divide-border">
-            {items.map((item) => (
-              <li key={item.category} className="flex items-center justify-between gap-4 py-3 first:pt-0 last:pb-0">
-                <span className="text-sm">{formatLabel(item.category)}</span>
-                <span className="data-number text-right text-sm font-medium">{formatMoney(item.amount)}</span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-muted-foreground">{emptyText}</p>
-        )}
+          <table className="w-full text-sm">
+            <tbody>{items.map((item) => <tr className="border-b last:border-0" key={item.category}><td className="py-2">{label(item.category)}</td><td className="data-number py-2 text-right font-medium">{formatMoney(item.amount)}</td></tr>)}</tbody>
+          </table>
+        ) : <p className="text-sm text-muted-foreground">No records were posted for this date.</p>}
       </CardContent>
     </Card>
   );
@@ -157,266 +124,116 @@ export function ReportsPage() {
   const [businessId, setBusinessId] = useState("");
   const [reportDate, setReportDate] = useState(localDate);
   const [report, setReport] = useState<DailyBusinessReport | null>(null);
-  const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
-  const [isLoadingReport, setIsLoadingReport] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    let active = true;
     invoke<Business[]>("business_list")
       .then((result) => {
-        if (active) {
-          setBusinesses(result);
-          setBusinessId((current) =>
-            result.some((business) => business.id === current) ? current : (result[0]?.id ?? ""),
-          );
-        }
+        setBusinesses(result);
+        setBusinessId(result[0]?.id ?? "");
       })
-      .catch((cause: unknown) => {
-        if (active) {
-          setError(`Could not load businesses. ${errorText(cause)}`);
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setIsLoadingBusinesses(false);
-        }
-      });
-    return () => {
-      active = false;
-    };
+      .catch((cause) => setError(`Could not load businesses. ${errorText(cause)}`))
+      .finally(() => setIsLoading(false));
   }, []);
 
   useEffect(() => {
-    if (!businessId || !reportDate) {
-      setReport(null);
-      setIsLoadingReport(false);
-      return;
-    }
-
-    let active = true;
-    setReport(null);
-    setIsLoadingReport(true);
+    if (!businessId || !reportDate) return;
+    setIsLoading(true);
     setError(null);
     invoke<DailyBusinessReport>("daily_business_report", { businessId, reportDate })
-      .then((result) => {
-        if (active) {
-          setReport(result);
-        }
+      .then(setReport)
+      .catch((cause) => {
+        setReport(null);
+        setError(`Could not calculate the daily report. ${errorText(cause)}`);
       })
-      .catch((cause: unknown) => {
-        if (active) {
-          setReport(null);
-          setError(`Could not load the daily report. ${errorText(cause)}`);
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setIsLoadingReport(false);
-        }
-      });
-    return () => {
-      active = false;
-    };
+      .finally(() => setIsLoading(false));
   }, [businessId, reportDate]);
 
-  const selectedBusiness = businesses.find((business) => business.id === businessId);
   const dateLabel = reportDate
-    ? new Date(`${reportDate}T00:00:00`).toLocaleDateString("en-RW", {
-        day: "numeric",
-        month: "long",
-        year: "numeric",
-      })
+    ? new Date(`${reportDate}T00:00:00`).toLocaleDateString("en-RW", { day: "numeric", month: "long", year: "numeric" })
     : "Select a date";
 
   return (
-    <div className="space-y-6">
+    <div className="daily-report space-y-6">
       <PageHeader
         eyebrow="Finance & reporting"
-        title="Daily business report"
-        description={selectedBusiness ? `Financial activity for ${selectedBusiness.name}.` : "Review sales and financial activity for a selected day."}
+        title="Daily calculation report"
+        description="Select one business day. The application calculates the totals and cash reconciliation for that date."
         actions={
-          <>
-            <div className="w-full space-y-1.5 sm:w-56">
-              <label htmlFor="report-business" className="text-xs font-medium text-muted-foreground">Business</label>
-              <SelectField
-                id="report-business"
-                value={businessId}
-                onChange={(event) => setBusinessId(event.target.value)}
-                disabled={isLoadingBusinesses || businesses.length === 0}
-              >
-                {businesses.map((business) => (
-                  <option key={business.id} value={business.id}>{business.name}</option>
-                ))}
-              </SelectField>
-            </div>
-            <div className="w-full space-y-1.5 sm:w-44">
-              <label htmlFor="report-date" className="text-xs font-medium text-muted-foreground">Report date</label>
-              <Input
-                id="report-date"
-                type="date"
-                value={reportDate}
-                onChange={(event) => setReportDate(event.target.value)}
-                max={localDate()}
-              />
-            </div>
-          </>
+          <div className="flex flex-wrap gap-2">
+            <SelectField value={businessId} onChange={(event) => setBusinessId(event.target.value)} aria-label="Business">
+              {businesses.map((business) => <option key={business.id} value={business.id}>{business.name}</option>)}
+            </SelectField>
+            <Input type="date" value={reportDate} max={localDate()} onChange={(event) => setReportDate(event.target.value)} aria-label="Report date" />
+          </div>
         }
       />
-
-      {error ? (
-        <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
-          {error}
-        </div>
-      ) : null}
-
-      {isLoadingBusinesses ? (
-        <Card>
-          <CardContent className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-            <LoaderCircle className="size-4 animate-spin" />
-            Loading business information...
-          </CardContent>
-        </Card>
-      ) : businesses.length === 0 ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>No business registered</CardTitle>
-            <CardDescription>Set up a business before generating a financial report.</CardDescription>
-          </CardHeader>
-        </Card>
-      ) : report ? (
-        <>
-          <div className="flex flex-wrap items-center justify-between gap-3">
+      {error ? <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{error}</div> : null}
+      {isLoading ? <Card><CardContent className="flex items-center gap-2 py-10 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Calculating this day...</CardContent></Card> : null}
+      {report ? (
+        <article className="report-paper space-y-6">
+          <header className="flex flex-wrap items-start justify-between gap-4 border-b-2 border-primary pb-5">
             <div>
-              <h2 className="font-heading text-lg font-semibold">{dateLabel}</h2>
-              <p className="text-sm text-muted-foreground">Daily totals and current outstanding balances</p>
+              <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">Daily business calculation</p>
+              <h2 className="font-heading text-2xl font-semibold">{report.business_name}</h2>
+              <p className="text-sm text-muted-foreground">{dateLabel}</p>
             </div>
-            {isLoadingReport ? <Badge variant="outline">Updating…</Badge> : <Badge variant="outline">Daily summary</Badge>}
-          </div>
+            <div className="flex gap-2 print:hidden">
+              <Button variant="outline" onClick={() => window.print()}><Printer />Print</Button>
+              <Button onClick={() => window.print()}><Download />Export PDF</Button>
+            </div>
+          </header>
 
-          <section aria-label="Daily financial summary" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <SummaryCard
-              label="Sales"
-              value={formatMoney(report.sales_total)}
-              detail={`${report.sale_count.toLocaleString("en-RW")} completed sales`}
-              icon={ShoppingBag}
-            />
-            <SummaryCard
-              label="Cost of goods sold"
-              value={formatMoney(report.cost_of_goods_sold)}
-              detail={`${report.sale_line_count.toLocaleString("en-RW")} sold product lines`}
-              icon={Package}
-            />
-            <SummaryCard
-              label="Gross profit"
-              value={formatMoney(report.gross_profit)}
-              detail="Sales less historical FIFO cost"
-              icon={CircleDollarSign}
-              emphasis
-            />
-            <SummaryCard
-              label="Operating result"
-              value={formatMoney(report.operating_result)}
-              detail="Gross profit less recorded expenses"
-              icon={BarChart3}
-              emphasis
-            />
+          <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Daily calculation summary">
+            <SummaryCard title="Money received" value={formatMoney(report.money_received)} detail="Actual incoming business payments" />
+            <SummaryCard title="Recorded expenses" value={formatMoney(report.expenses_total)} detail="Operating expenses only" />
+            <SummaryCard title="Net position" value={formatMoney(report.net_position)} detail="Money received minus expenses" positive={report.net_position >= 0} />
+            <SummaryCard title="Physical cash remaining" value={formatMoney(report.physical_closing_cash)} detail="Verified cash drawer balance" />
           </section>
 
-          <section aria-label="Daily cash and purchasing activity" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <SummaryCard
-              label="Credit sales"
-              value={formatMoney(report.credit_sales)}
-              detail="Unpaid amount from sales on this date"
-              icon={ReceiptText}
-            />
-            <SummaryCard
-              label="Customer repayments"
-              value={formatMoney(report.customer_repayments)}
-              detail="Debt collections received on this date"
-              icon={Wallet}
-            />
-            <SummaryCard
-              label="Supplier payments"
-              value={formatMoney(report.supplier_payments)}
-              detail="Payments made on this date"
-              icon={Wallet}
-            />
-            <SummaryCard
-              label="Purchases received"
-              value={formatMoney(report.purchases_received)}
-              detail="Goods received, not treated as an expense"
-              icon={Package}
-            />
+          <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <SummaryCard title="Opening physical cash" value={formatMoney(report.opening_physical_cash)} detail="Carried from the previous day" />
+            <SummaryCard title="Cash received" value={formatMoney(report.cash_received)} detail="Cash drawer inflows excluding transfers" />
+            <SummaryCard title="Cash expenses" value={formatMoney(report.cash_expenses)} detail="Expenses paid from the drawer" />
+            <SummaryCard title="Cash sent out" value={formatMoney(report.cash_transferred_to_bank + report.cash_transferred_to_mobile_money + report.other_verified_cash_outflows)} detail="Bank, Mobile Money, and other verified outflows" />
           </section>
 
-          <section aria-label="Daily breakdowns" className="grid gap-4 xl:grid-cols-2">
-            <BreakdownList
-              title="Sales collections"
-              description="Payments recorded against completed sales by method"
-              items={report.sales_by_payment_method}
-              emptyText="No sale payments were recorded on this date."
-              formatLabel={paymentMethodLabel}
-            />
-            <BreakdownList
-              title="Operating expenses"
-              description={`Total recorded: ${formatMoney(report.expenses_total)}`}
-              items={report.expenses_by_category}
-              emptyText="No operating expenses were recorded on this date."
-            />
+          <section className="grid gap-6 xl:grid-cols-2">
+            <BreakdownTable title="Money received" description="Each incoming source is counted once from the verified cash ledger." items={[
+              ...report.sales_by_payment_method,
+              ...(report.customer_repayments ? [{ category: "customer repayments", amount: report.customer_repayments }] : []),
+              ...(report.loan_received ? [{ category: "loan received", amount: report.loan_received }] : []),
+              ...(report.other_receipts ? [{ category: "other receipts", amount: report.other_receipts }] : []),
+            ]} />
+            <BreakdownTable title="Expenses by category" description={`Total recorded operating expenses: ${formatMoney(report.expenses_total)}`} items={report.expenses_by_category} />
           </section>
 
-          <section aria-label="Outstanding balances and adjustments" className="grid gap-4 xl:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Outstanding balances</CardTitle>
-                <CardDescription>Current business-wide balances, not limited to this report date</CardDescription>
-              </CardHeader>
-              <CardContent className="grid gap-4 sm:grid-cols-2">
-                <div className="rounded-lg border border-border/80 p-4">
-                  <p className="text-xs font-medium text-muted-foreground">Customer receivables</p>
-                  <p className="data-number mt-2 text-lg font-semibold">{formatMoney(report.customer_outstanding)}</p>
-                </div>
-                <div className="rounded-lg border border-border/80 p-4">
-                  <p className="text-xs font-medium text-muted-foreground">Supplier balances</p>
-                  <p className="data-number mt-2 text-lg font-semibold">{formatMoney(report.supplier_outstanding)}</p>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Stock adjustments</CardTitle>
-                <CardDescription>Adjustment events recorded on {dateLabel}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                {report.stock_adjustment_counts.length ? (
-                  <ul className="divide-y divide-border">
-                    {report.stock_adjustment_counts.map((item) => (
-                      <li key={item.movement_type} className="flex items-center justify-between gap-4 py-3 first:pt-0 last:pb-0">
-                        <span className="text-sm">{categoryLabel(item.movement_type)}</span>
-                        <span className="data-number text-sm font-medium">{item.count.toLocaleString("en-RW")}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-sm text-muted-foreground">No stock adjustment events were recorded on this date.</p>
-                )}
-              </CardContent>
-            </Card>
+          <Card>
+            <CardHeader><CardTitle>Physical cash reconciliation</CardTitle><CardDescription>This is cash in the physical drawer, not total business assets and not profit.</CardDescription></CardHeader>
+            <CardContent>
+              <table className="w-full text-sm"><tbody>
+                <tr className="border-b"><td className="py-2">Opening physical cash</td><td className="data-number py-2 text-right">{formatMoney(report.opening_physical_cash)}</td></tr>
+                <tr className="border-b"><td className="py-2">+ Cash received</td><td className="data-number py-2 text-right">{formatMoney(report.cash_received)}</td></tr>
+                <tr className="border-b"><td className="py-2">− Cash expenses</td><td className="data-number py-2 text-right">{formatMoney(report.cash_expenses)}</td></tr>
+                <tr className="border-b"><td className="py-2">− Transferred to bank</td><td className="data-number py-2 text-right">{formatMoney(report.cash_transferred_to_bank)}</td></tr>
+                <tr className="border-b"><td className="py-2">− Transferred to Mobile Money</td><td className="data-number py-2 text-right">{formatMoney(report.cash_transferred_to_mobile_money)}</td></tr>
+                <tr className="border-b"><td className="py-2">− Other verified cash outflows</td><td className="data-number py-2 text-right">{formatMoney(report.other_verified_cash_outflows)}</td></tr>
+                <tr className="font-semibold"><td className="pt-3">Physical closing cash</td><td className="data-number pt-3 text-right">{formatMoney(report.physical_closing_cash)}</td></tr>
+              </tbody></table>
+            </CardContent>
+          </Card>
+
+          <section className="grid gap-6 xl:grid-cols-3">
+            <SummaryCard title="Sales value" value={formatMoney(report.sales_total)} detail={`${report.sale_count} completed sales; this is not all cash received`} />
+            <SummaryCard title="Supplier payments" value={formatMoney(report.supplier_payments)} detail="Separate from operating expenses" />
+            <SummaryCard title="Customer debt outstanding" value={formatMoney(report.customer_outstanding)} detail="Unpaid customer balances at report time" />
           </section>
 
-          <p className="rounded-lg border border-border/80 bg-muted/30 p-4 text-xs leading-5 text-muted-foreground">
-            This report uses recorded sale costs and ledgers. Timestamp-based activity follows the computer&apos;s local timezone; the business timezone setting is not applied yet. Cash opening/closing balances, cash discrepancies, employee attribution, and PDF export are also not available yet.
-          </p>
-        </>
-      ) : isLoadingReport ? (
-        <Card>
-          <CardContent className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-            <LoaderCircle className="size-4 animate-spin" />
-            Loading the daily report...
-          </CardContent>
-        </Card>
+          <p className="flex items-start gap-2 rounded-lg border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground"><WalletCards className="mt-0.5 size-4 shrink-0" />Net position is a cash-based management measure, not accounting profit. Loans and transfers are shown separately and are not treated as operating expenses.</p>
+        </article>
       ) : null}
+      {!isLoading && !report && !error ? <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">Select a business and date to calculate the daily report.</CardContent></Card> : null}
     </div>
   );
 }

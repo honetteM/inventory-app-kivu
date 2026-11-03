@@ -3207,6 +3207,18 @@ pub struct DailyCountBreakdown {
 pub struct DailyBusinessReport {
     pub business_name: String,
     pub report_date: String,
+    pub money_received: i64,
+    pub net_position: i64,
+    pub opening_physical_cash: i64,
+    pub cash_received: i64,
+    pub cash_expenses: i64,
+    pub cash_transferred_to_bank: i64,
+    pub cash_transferred_to_mobile_money: i64,
+    pub other_verified_cash_outflows: i64,
+    pub physical_closing_cash: i64,
+    pub loan_received: i64,
+    pub loan_repayments: i64,
+    pub other_receipts: i64,
     pub sale_count: i64,
     pub sales_total: i64,
     pub sales_by_payment_method: Vec<DailyAmountBreakdown>,
@@ -3253,6 +3265,118 @@ pub fn daily_business_report(
         .optional()?;
     let business_name = business_name
         .ok_or_else(|| DbError::InvalidInput("business does not exist".to_string()))?;
+
+    let opening_physical_cash: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(
+            o.opening_amount + COALESCE((
+            SELECT SUM(CASE WHEN m.direction = 'in' THEN m.amount ELSE -m.amount END)
+            FROM cash_movements m
+            WHERE m.business_id = o.business_id AND m.account_id = o.account_id
+              AND m.recorded_at >= o.recorded_at
+              AND date(m.occurred_at, 'localtime') < ?2
+        ), 0)
+        ), 0)
+         FROM cash_account_openings o
+         JOIN cash_accounts a ON a.id = o.account_id AND a.business_id = o.business_id
+         WHERE o.business_id = ?1 AND a.account_type = 'cash_drawer'",
+        params![business_id, report_date],
+        |row| row.get(0),
+    )?;
+    let cash_movement_sum = |condition: &str| -> Result<i64, DbError> {
+        let sql = format!(
+            "SELECT COALESCE(SUM(m.amount), 0)
+             FROM cash_movements m
+             JOIN cash_accounts a ON a.id = m.account_id AND a.business_id = m.business_id
+             WHERE m.business_id = ?1 AND a.account_type = 'cash_drawer'
+               AND date(m.occurred_at, 'localtime') = ?2 AND {condition}"
+        );
+        Ok(conn.query_row(&sql, params![business_id, report_date], |row| row.get(0))?)
+    };
+    let cash_received =
+        cash_movement_sum("m.direction = 'in' AND m.movement_type != 'transfer_in'")?;
+    let cash_expenses =
+        cash_movement_sum("m.direction = 'out' AND m.movement_type = 'expense_payment'")?;
+    let cash_transferred_to_bank = conn.query_row(
+        "SELECT COALESCE(SUM(m.amount), 0)
+         FROM cash_movements m
+         JOIN cash_accounts from_account ON from_account.id = m.account_id
+             AND from_account.business_id = m.business_id
+         JOIN cash_transfers t ON t.id = m.transfer_id AND t.business_id = m.business_id
+         JOIN cash_accounts to_account ON to_account.id = t.to_account_id
+             AND to_account.business_id = t.business_id
+         WHERE m.business_id = ?1 AND from_account.account_type = 'cash_drawer'
+           AND to_account.account_type = 'bank' AND m.movement_type = 'transfer_out'
+           AND date(m.occurred_at, 'localtime') = ?2",
+        params![business_id, report_date],
+        |row| row.get(0),
+    )?;
+    let cash_transferred_to_mobile_money = conn.query_row(
+        "SELECT COALESCE(SUM(m.amount), 0)
+         FROM cash_movements m
+         JOIN cash_accounts from_account ON from_account.id = m.account_id
+             AND from_account.business_id = m.business_id
+         JOIN cash_transfers t ON t.id = m.transfer_id AND t.business_id = m.business_id
+         JOIN cash_accounts to_account ON to_account.id = t.to_account_id
+             AND to_account.business_id = t.business_id
+         WHERE m.business_id = ?1 AND from_account.account_type = 'cash_drawer'
+           AND to_account.account_type IN ('mtn_wallet', 'airtel_wallet')
+           AND m.movement_type = 'transfer_out'
+           AND date(m.occurred_at, 'localtime') = ?2",
+        params![business_id, report_date],
+        |row| row.get(0),
+    )?;
+    let other_verified_cash_outflows = cash_movement_sum(
+        "m.direction = 'out' AND m.movement_type NOT IN ('expense_payment', 'transfer_out')",
+    )?;
+    let physical_closing_cash: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(
+            o.opening_amount + COALESCE((
+            SELECT SUM(CASE WHEN m.direction = 'in' THEN m.amount ELSE -m.amount END)
+            FROM cash_movements m
+            WHERE m.business_id = o.business_id AND m.account_id = o.account_id
+              AND m.recorded_at >= o.recorded_at
+              AND date(m.occurred_at, 'localtime') <= ?2
+        ), 0)
+        ), 0)
+         FROM cash_account_openings o
+         JOIN cash_accounts a ON a.id = o.account_id AND a.business_id = o.business_id
+         WHERE o.business_id = ?1 AND a.account_type = 'cash_drawer'",
+        params![business_id, report_date],
+        |row| row.get(0),
+    )?;
+    let loan_received = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(amount), 0) FROM cash_movements
+         WHERE business_id = ?1 AND movement_type = 'loan_issued'
+           AND date(occurred_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
+    let loan_repayments = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(amount), 0) FROM cash_movements
+         WHERE business_id = ?1 AND movement_type = 'loan_repayment'
+           AND date(occurred_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
+    let other_receipts = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(amount), 0) FROM cash_movements
+         WHERE business_id = ?1 AND movement_type = 'other_receipt'
+           AND date(occurred_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
+    let money_received = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(amount), 0) FROM cash_movements
+         WHERE business_id = ?1 AND direction = 'in'
+           AND movement_type != 'transfer_in'
+           AND date(occurred_at, 'localtime') = ?2",
+        business_id,
+        report_date,
+    )?;
 
     let sale_count = report_amount(
         conn,
@@ -3312,6 +3436,9 @@ pub fn daily_business_report(
         business_id,
         report_date,
     )?;
+    let net_position = money_received.checked_sub(expenses_total).ok_or_else(|| {
+        DbError::InvalidInput("daily net position exceeds the supported range".to_string())
+    })?;
     let mut expense_stmt = conn.prepare(
         "SELECT category, SUM(amount) FROM expenses
          WHERE business_id = ?1 AND expense_date = ?2
@@ -3411,6 +3538,18 @@ pub fn daily_business_report(
     Ok(DailyBusinessReport {
         business_name,
         report_date: report_date.to_string(),
+        money_received,
+        net_position,
+        opening_physical_cash,
+        cash_received,
+        cash_expenses,
+        cash_transferred_to_bank,
+        cash_transferred_to_mobile_money,
+        other_verified_cash_outflows,
+        physical_closing_cash,
+        loan_received,
+        loan_repayments,
+        other_receipts,
         sale_count,
         sales_total,
         sales_by_payment_method,
@@ -9281,6 +9420,17 @@ mod tests {
 
         assert_eq!(report.business_name, "Hardware shop");
         assert_eq!(report.report_date, report_date);
+        assert_eq!(report.money_received, 11_000);
+        assert_eq!(report.net_position, 10_500);
+        assert_eq!(report.cash_received, 5_000);
+        assert_eq!(report.cash_expenses, 500);
+        assert_eq!(report.cash_transferred_to_bank, 0);
+        assert_eq!(report.cash_transferred_to_mobile_money, 0);
+        assert_eq!(report.other_verified_cash_outflows, 0);
+        assert_eq!(
+            report.physical_closing_cash,
+            report.opening_physical_cash + 5_000 - 500
+        );
         assert_eq!(report.sale_count, 1);
         assert_eq!(report.sales_total, 15_000);
         assert_eq!(
