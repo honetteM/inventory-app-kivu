@@ -194,3 +194,30 @@ body {
     scrollbar-width: thin;
   }
 }
+
+@media print {
+  body {
+    background: white;
+    color: black;
+  }
+
+  .report-page {
+    padding: 0;
+  }
+
+  .report-document {
+    max-width: none;
+  }
+
+  .report-document > * {
+    break-inside: avoid;
+  }
+
+  .report-document table {
+    break-inside: auto;
+  }
+
+  .report-document tr {
+    break-inside: avoid;
+  }
+}

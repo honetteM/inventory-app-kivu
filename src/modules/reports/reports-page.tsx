@@ -1,153 +1,72 @@
 import { invoke } from "@tauri-apps/api/core";
+import { BarChart3, Download, LoaderCircle, Printer } from "lucide-react";
 import { useEffect, useState } from "react";
-import { BarChart3, CircleDollarSign, LoaderCircle, Package, ReceiptText, ShoppingBag, Wallet } from "lucide-react";
 
 import { PageHeader } from "@/components/shared/page-header";
-import { SelectField } from "@/components/shared/select-field";
-import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { SelectField } from "@/components/shared/select-field";
 
-const MONEY_SCALE = 100n;
-
-interface Business {
-  id: string;
-  name: string;
-}
-
-interface AmountBreakdown {
-  category: string;
-  amount: number;
-}
-
-interface CountBreakdown {
-  movement_type: string;
-  count: number;
-}
-
-interface DailyBusinessReport {
+const SCALE = 100n;
+type ReportType = "daily" | "weekly" | "monthly" | "yearly";
+type Business = { id: string; name: string };
+type Breakdown = { category: string; amount: number };
+type ReportDay = { date: string; money_received: number; expenses: number; net_position: number };
+type BusinessReport = {
   business_name: string;
-  report_date: string;
-  sale_count: number;
-  sales_total: number;
-  sales_by_payment_method: AmountBreakdown[];
-  credit_sales: number;
-  customer_repayments: number;
+  currency: string;
+  report_type: ReportType;
+  start_date: string;
+  end_date: string;
+  money_received: number;
   expenses_total: number;
-  expenses_by_category: AmountBreakdown[];
-  supplier_payments: number;
-  purchases_received: number;
-  cost_of_goods_sold: number;
-  gross_profit: number;
-  operating_result: number;
-  sale_line_count: number;
+  net_position: number;
+  sales_received: number;
+  customer_repayments: number;
+  expenses_by_category: Breakdown[];
+  received_by_method: Breakdown[];
+  cash_received: number;
+  cash_expenses: number;
+  cash_transferred_out: number;
+  cash_other_out: number;
+  opening_physical_cash: number | null;
+  closing_physical_cash: number | null;
   customer_outstanding: number;
   supplier_outstanding: number;
-  stock_adjustment_counts: CountBreakdown[];
-}
+  daily_breakdown: ReportDay[];
+};
 
-function localDate(): string {
+function localDate() {
   const date = new Date();
-  const offset = date.getTimezoneOffset() * 60_000;
-  return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+  date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+  return date.toISOString().slice(0, 10);
 }
 
-function formatMoney(value: number): string {
-  if (!Number.isSafeInteger(value)) {
-    return "—";
-  }
+function money(value: number, currency = "RWF") {
+  if (!Number.isSafeInteger(value)) return "—";
   const amount = BigInt(value);
-  const absoluteAmount = amount < 0n ? -amount : amount;
-  const whole = absoluteAmount / MONEY_SCALE;
-  const fraction = absoluteAmount % MONEY_SCALE;
+  const absolute = amount < 0n ? -amount : amount;
+  const whole = absolute / SCALE;
+  const fraction = absolute % SCALE;
   return `${amount < 0n ? "−" : ""}${new Intl.NumberFormat("en-RW").format(Number(whole))}${
-    fraction === 0n ? "" : `.${fraction.toString().padStart(2, "0")}`
-  } RWF`;
+    fraction ? `.${fraction.toString().padStart(2, "0")}` : ""
+  } ${currency}`;
 }
 
-function paymentMethodLabel(method: string): string {
-  const labels: Record<string, string> = {
-    cash: "Cash",
-    mtn_mobile_money: "MTN Mobile Money",
-    airtel_money: "Airtel Money",
-    bank_transfer: "Bank transfer",
-  };
-  return labels[method] ?? method;
+function label(value: string) {
+  return value.split("_").join(" ").replace(/\b\w/g, (letter: string) => letter.toUpperCase());
 }
 
-function categoryLabel(category: string): string {
-  return category
-    .split("_")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
-
-function errorText(cause: unknown): string {
+function errorText(cause: unknown) {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-function SummaryCard({
-  label,
-  value,
-  detail,
-  icon: Icon,
-  emphasis = false,
-}: {
-  label: string;
-  value: string;
-  detail: string;
-  icon: typeof CircleDollarSign;
-  emphasis?: boolean;
-}) {
+function SummaryCard({ title, value, detail }: { title: string; value: string; detail: string }) {
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardDescription>{label}</CardDescription>
-        <Icon className="size-4 text-muted-foreground" />
-      </CardHeader>
-      <CardContent>
-        <p className={`data-number text-xl font-semibold tracking-tight sm:text-2xl ${emphasis ? "text-primary" : ""}`}>
-          {value}
-        </p>
-        <p className="mt-1 text-xs text-muted-foreground">{detail}</p>
-      </CardContent>
-    </Card>
-  );
-}
-
-function BreakdownList({
-  title,
-  description,
-  items,
-  emptyText,
-  formatLabel = categoryLabel,
-}: {
-  title: string;
-  description: string;
-  items: AmountBreakdown[];
-  emptyText: string;
-  formatLabel?: (category: string) => string;
-}) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{title}</CardTitle>
-        <CardDescription>{description}</CardDescription>
-      </CardHeader>
-      <CardContent>
-        {items.length ? (
-          <ul className="divide-y divide-border">
-            {items.map((item) => (
-              <li key={item.category} className="flex items-center justify-between gap-4 py-3 first:pt-0 last:pb-0">
-                <span className="text-sm">{formatLabel(item.category)}</span>
-                <span className="data-number text-right text-sm font-medium">{formatMoney(item.amount)}</span>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="text-sm text-muted-foreground">{emptyText}</p>
-        )}
-      </CardContent>
+      <CardHeader className="pb-2"><CardDescription>{title}</CardDescription></CardHeader>
+      <CardContent><p className="data-number text-xl font-semibold">{value}</p><p className="mt-1 text-xs text-muted-foreground">{detail}</p></CardContent>
     </Card>
   );
 }
@@ -155,268 +74,88 @@ function BreakdownList({
 export function ReportsPage() {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessId, setBusinessId] = useState("");
-  const [reportDate, setReportDate] = useState(localDate);
-  const [report, setReport] = useState<DailyBusinessReport | null>(null);
-  const [isLoadingBusinesses, setIsLoadingBusinesses] = useState(true);
-  const [isLoadingReport, setIsLoadingReport] = useState(false);
+  const [reportType, setReportType] = useState<ReportType>("daily");
+  const [anchorDate, setAnchorDate] = useState(localDate);
+  const [report, setReport] = useState<BusinessReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    let active = true;
     invoke<Business[]>("business_list")
-      .then((result) => {
-        if (active) {
-          setBusinesses(result);
-          setBusinessId((current) =>
-            result.some((business) => business.id === current) ? current : (result[0]?.id ?? ""),
-          );
-        }
+      .then((items) => {
+        setBusinesses(items);
+        setBusinessId(items[0]?.id ?? "");
       })
-      .catch((cause: unknown) => {
-        if (active) {
-          setError(`Could not load businesses. ${errorText(cause)}`);
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setIsLoadingBusinesses(false);
-        }
-      });
-    return () => {
-      active = false;
-    };
+      .catch((cause) => setError(`Could not load businesses. ${errorText(cause)}`));
   }, []);
 
   useEffect(() => {
-    if (!businessId || !reportDate) {
-      setReport(null);
-      setIsLoadingReport(false);
-      return;
-    }
-
-    let active = true;
-    setReport(null);
-    setIsLoadingReport(true);
+    if (!businessId || !anchorDate) return;
+    setLoading(true);
     setError(null);
-    invoke<DailyBusinessReport>("daily_business_report", { businessId, reportDate })
-      .then((result) => {
-        if (active) {
-          setReport(result);
-        }
+    invoke<BusinessReport>("business_report", { businessId, reportType, anchorDate })
+      .then(setReport)
+      .catch((cause) => {
+        setReport(null);
+        setError(`Could not load the report. ${errorText(cause)}`);
       })
-      .catch((cause: unknown) => {
-        if (active) {
-          setReport(null);
-          setError(`Could not load the daily report. ${errorText(cause)}`);
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setIsLoadingReport(false);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [businessId, reportDate]);
+      .finally(() => setLoading(false));
+  }, [businessId, reportType, anchorDate]);
 
-  const selectedBusiness = businesses.find((business) => business.id === businessId);
-  const dateLabel = reportDate
-    ? new Date(`${reportDate}T00:00:00`).toLocaleDateString("en-RW", {
-        day: "numeric",
-        month: "long",
-        year: "numeric",
-      })
-    : "Select a date";
+  const period = report ? `${report.start_date} to ${report.end_date}` : "Select a period";
+  const printReport = () => window.print();
 
   return (
-    <div className="space-y-6">
+    <div className="report-page space-y-6">
       <PageHeader
         eyebrow="Finance & reporting"
-        title="Daily business report"
-        description={selectedBusiness ? `Financial activity for ${selectedBusiness.name}.` : "Review sales and financial activity for a selected day."}
+        title="Business reports"
+        description="Understand money received, recorded expenses, and verified cash activity without confusing cash position with profit."
         actions={
-          <>
-            <div className="w-full space-y-1.5 sm:w-56">
-              <label htmlFor="report-business" className="text-xs font-medium text-muted-foreground">Business</label>
-              <SelectField
-                id="report-business"
-                value={businessId}
-                onChange={(event) => setBusinessId(event.target.value)}
-                disabled={isLoadingBusinesses || businesses.length === 0}
-              >
-                {businesses.map((business) => (
-                  <option key={business.id} value={business.id}>{business.name}</option>
-                ))}
-              </SelectField>
-            </div>
-            <div className="w-full space-y-1.5 sm:w-44">
-              <label htmlFor="report-date" className="text-xs font-medium text-muted-foreground">Report date</label>
-              <Input
-                id="report-date"
-                type="date"
-                value={reportDate}
-                onChange={(event) => setReportDate(event.target.value)}
-                max={localDate()}
-              />
-            </div>
-          </>
+          <div className="flex flex-wrap gap-2">
+            <SelectField value={businessId} onChange={(event) => setBusinessId(event.target.value)} aria-label="Business">
+              {businesses.map((business) => <option key={business.id} value={business.id}>{business.name}</option>)}
+            </SelectField>
+            <SelectField value={reportType} onChange={(event) => setReportType(event.target.value as ReportType)} aria-label="Report type">
+              <option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="yearly">Yearly</option>
+            </SelectField>
+            <Input type="date" value={anchorDate} max={localDate()} onChange={(event) => setAnchorDate(event.target.value)} aria-label="Report date" />
+          </div>
         }
       />
-
-      {error ? (
-        <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
-          {error}
-        </div>
-      ) : null}
-
-      {isLoadingBusinesses ? (
-        <Card>
-          <CardContent className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-            <LoaderCircle className="size-4 animate-spin" />
-            Loading business information...
-          </CardContent>
-        </Card>
-      ) : businesses.length === 0 ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>No business registered</CardTitle>
-            <CardDescription>Set up a business before generating a financial report.</CardDescription>
-          </CardHeader>
-        </Card>
-      ) : report ? (
-        <>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="font-heading text-lg font-semibold">{dateLabel}</h2>
-              <p className="text-sm text-muted-foreground">Daily totals and current outstanding balances</p>
-            </div>
-            {isLoadingReport ? <Badge variant="outline">Updating…</Badge> : <Badge variant="outline">Daily summary</Badge>}
+      {error ? <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{error}</div> : null}
+      {loading ? <Card><CardContent className="flex items-center gap-2 py-10 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Preparing report...</CardContent></Card> : null}
+      {report ? (
+        <article className="report-document space-y-6">
+          <header className="flex flex-wrap items-start justify-between gap-4 border-b pb-5">
+            <div><p className="text-sm font-medium text-muted-foreground">{label(report.report_type)} business report</p><h2 className="font-heading text-2xl font-semibold">{report.business_name}</h2><p className="text-sm text-muted-foreground">{period}</p></div>
+            <div className="flex gap-2 print:hidden"><Button variant="outline" onClick={printReport}><Printer />Print</Button><Button onClick={printReport}><Download />Export PDF</Button></div>
+          </header>
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+            <SummaryCard title="Money received" value={money(report.money_received, report.currency)} detail="Actual recorded incoming payments" />
+            <SummaryCard title="Recorded expenses" value={money(report.expenses_total, report.currency)} detail="Operating expenses only" />
+            <SummaryCard title="Net position" value={money(report.net_position, report.currency)} detail="Money received less expenses" />
+            <SummaryCard title="Sales received" value={money(report.sales_received, report.currency)} detail="Payments against completed sales" />
+            <SummaryCard title="Customer debt" value={money(report.customer_outstanding, report.currency)} detail="Outstanding at report generation" />
           </div>
-
-          <section aria-label="Daily financial summary" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <SummaryCard
-              label="Sales"
-              value={formatMoney(report.sales_total)}
-              detail={`${report.sale_count.toLocaleString("en-RW")} completed sales`}
-              icon={ShoppingBag}
-            />
-            <SummaryCard
-              label="Cost of goods sold"
-              value={formatMoney(report.cost_of_goods_sold)}
-              detail={`${report.sale_line_count.toLocaleString("en-RW")} sold product lines`}
-              icon={Package}
-            />
-            <SummaryCard
-              label="Gross profit"
-              value={formatMoney(report.gross_profit)}
-              detail="Sales less historical FIFO cost"
-              icon={CircleDollarSign}
-              emphasis
-            />
-            <SummaryCard
-              label="Operating result"
-              value={formatMoney(report.operating_result)}
-              detail="Gross profit less recorded expenses"
-              icon={BarChart3}
-              emphasis
-            />
-          </section>
-
-          <section aria-label="Daily cash and purchasing activity" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <SummaryCard
-              label="Credit sales"
-              value={formatMoney(report.credit_sales)}
-              detail="Unpaid amount from sales on this date"
-              icon={ReceiptText}
-            />
-            <SummaryCard
-              label="Customer repayments"
-              value={formatMoney(report.customer_repayments)}
-              detail="Debt collections received on this date"
-              icon={Wallet}
-            />
-            <SummaryCard
-              label="Supplier payments"
-              value={formatMoney(report.supplier_payments)}
-              detail="Payments made on this date"
-              icon={Wallet}
-            />
-            <SummaryCard
-              label="Purchases received"
-              value={formatMoney(report.purchases_received)}
-              detail="Goods received, not treated as an expense"
-              icon={Package}
-            />
-          </section>
-
-          <section aria-label="Daily breakdowns" className="grid gap-4 xl:grid-cols-2">
-            <BreakdownList
-              title="Sales collections"
-              description="Payments recorded against completed sales by method"
-              items={report.sales_by_payment_method}
-              emptyText="No sale payments were recorded on this date."
-              formatLabel={paymentMethodLabel}
-            />
-            <BreakdownList
-              title="Operating expenses"
-              description={`Total recorded: ${formatMoney(report.expenses_total)}`}
-              items={report.expenses_by_category}
-              emptyText="No operating expenses were recorded on this date."
-            />
-          </section>
-
-          <section aria-label="Outstanding balances and adjustments" className="grid gap-4 xl:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Outstanding balances</CardTitle>
-                <CardDescription>Current business-wide balances, not limited to this report date</CardDescription>
-              </CardHeader>
-              <CardContent className="grid gap-4 sm:grid-cols-2">
-                <div className="rounded-lg border border-border/80 p-4">
-                  <p className="text-xs font-medium text-muted-foreground">Customer receivables</p>
-                  <p className="data-number mt-2 text-lg font-semibold">{formatMoney(report.customer_outstanding)}</p>
-                </div>
-                <div className="rounded-lg border border-border/80 p-4">
-                  <p className="text-xs font-medium text-muted-foreground">Supplier balances</p>
-                  <p className="data-number mt-2 text-lg font-semibold">{formatMoney(report.supplier_outstanding)}</p>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle>Stock adjustments</CardTitle>
-                <CardDescription>Adjustment events recorded on {dateLabel}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                {report.stock_adjustment_counts.length ? (
-                  <ul className="divide-y divide-border">
-                    {report.stock_adjustment_counts.map((item) => (
-                      <li key={item.movement_type} className="flex items-center justify-between gap-4 py-3 first:pt-0 last:pb-0">
-                        <span className="text-sm">{categoryLabel(item.movement_type)}</span>
-                        <span className="data-number text-sm font-medium">{item.count.toLocaleString("en-RW")}</span>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="text-sm text-muted-foreground">No stock adjustment events were recorded on this date.</p>
-                )}
-              </CardContent>
-            </Card>
-          </section>
-
-          <p className="rounded-lg border border-border/80 bg-muted/30 p-4 text-xs leading-5 text-muted-foreground">
-            This report uses recorded sale costs and ledgers. Timestamp-based activity follows the computer&apos;s local timezone; the business timezone setting is not applied yet. Cash opening/closing balances, cash discrepancies, employee attribution, and PDF export are also not available yet.
-          </p>
-        </>
-      ) : isLoadingReport ? (
-        <Card>
-          <CardContent className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
-            <LoaderCircle className="size-4 animate-spin" />
-            Loading the daily report...
-          </CardContent>
-        </Card>
+          {report.report_type === "daily" ? (
+            <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <SummaryCard title="Opening physical cash" value={money(report.opening_physical_cash ?? 0, report.currency)} detail="Cash carried from the previous day" />
+              <SummaryCard title="Cash received" value={money(report.cash_received, report.currency)} detail="Verified cash drawer inflows" />
+              <SummaryCard title="Cash expenses" value={money(report.cash_expenses, report.currency)} detail="Expenses paid from cash" />
+              <SummaryCard title="Physical cash remaining" value={money(report.closing_physical_cash ?? 0, report.currency)} detail={`After transfers and other cash outflows (${money(report.cash_other_out, report.currency)})`} />
+            </section>
+          ) : null}
+          <div className="grid gap-6 xl:grid-cols-2">
+            <Card><CardHeader><CardTitle>Where money came from</CardTitle><CardDescription>Incoming verified cash movements by recorded source.</CardDescription></CardHeader><CardContent className="space-y-3">{report.received_by_method.length ? report.received_by_method.map((item) => <div className="flex justify-between border-b pb-2 text-sm" key={item.category}><span>{label(item.category)}</span><strong>{money(item.amount, report.currency)}</strong></div>) : <p className="text-sm text-muted-foreground">No money was received in this period.</p>}</CardContent></Card>
+            <Card><CardHeader><CardTitle>Where money went</CardTitle><CardDescription>Recorded operating expenses. Transfers and supplier payments are excluded.</CardDescription></CardHeader><CardContent className="space-y-3">{report.expenses_by_category.length ? report.expenses_by_category.map((item) => <div className="flex justify-between border-b pb-2 text-sm" key={item.category}><span>{label(item.category)}</span><strong>{money(item.amount, report.currency)}</strong></div>) : <p className="text-sm text-muted-foreground">No operating expenses were recorded.</p>}</CardContent></Card>
+          </div>
+          <Card><CardHeader><CardTitle>{report.report_type === "daily" ? "Daily activity" : "Performance breakdown"}</CardTitle><CardDescription>Net position is not accounting profit; it is actual money received less recorded expenses.</CardDescription></CardHeader><CardContent><div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="border-b text-left"><th className="p-2">Date</th><th className="p-2 text-right">Money received</th><th className="p-2 text-right">Expenses</th><th className="p-2 text-right">Net position</th></tr></thead><tbody>{report.daily_breakdown.map((row) => <tr className="border-b" key={row.date}><td className="p-2">{row.date}</td><td className="data-number p-2 text-right">{money(row.money_received, report.currency)}</td><td className="data-number p-2 text-right">{money(row.expenses, report.currency)}</td><td className={`data-number p-2 text-right font-medium ${row.net_position < 0 ? "text-destructive" : "text-emerald-700"}`}>{money(row.net_position, report.currency)}</td></tr>)}</tbody></table></div></CardContent></Card>
+          <Card><CardHeader><CardTitle>Financial obligations</CardTitle><CardDescription>These balances are separate from available cash and net position.</CardDescription></CardHeader><CardContent className="grid gap-4 sm:grid-cols-2"><div><p className="text-xs text-muted-foreground">Customer outstanding</p><p className="data-number text-lg font-semibold">{money(report.customer_outstanding, report.currency)}</p></div><div><p className="text-xs text-muted-foreground">Supplier outstanding</p><p className="data-number text-lg font-semibold">{money(report.supplier_outstanding, report.currency)}</p></div></CardContent></Card>
+          <p className="text-sm text-muted-foreground">Management insight: {report.business_name} received {money(report.money_received, report.currency)} and recorded {money(report.expenses_total, report.currency)} in expenses during this period. The resulting net cash position was {money(report.net_position, report.currency)}. Loan, prepaid-cash, and dedicated deposit records are not available in the current database schema.</p>
+        </article>
       ) : null}
+      {!loading && !report && !error ? <Card><CardContent className="py-10 text-center text-sm text-muted-foreground"><BarChart3 className="mx-auto mb-2 size-8" />Choose a period to prepare a report.</CardContent></Card> : null}
     </div>
   );
 }
