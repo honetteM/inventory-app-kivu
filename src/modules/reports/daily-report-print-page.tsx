@@ -147,7 +147,7 @@ export function DailyReportPrintPage() {
           <div><span>Total inflow</span><strong>{formatMoney(report.total_inflow)}</strong><small>All completed sales</small></div>
           <div><span>Total outflow</span><strong>{formatMoney(report.total_outflow)}</strong><small>All operating expenses</small></div>
           <div className={report.net_position >= 0 ? "is-positive" : "is-negative"}><span>Net position</span><strong>{formatMoney(report.net_position)}</strong><small>Received less expenses</small></div>
-          <div><span>Ending cash</span><strong>{formatMoney(report.ending_cash)}</strong><small>Position adjusted for loans</small></div>
+          <div><span>Ending cash</span><strong>{formatMoney(report.ending_cash)}</strong><small>Starting balance plus net position</small></div>
           <div><span>Physical cash remaining</span><strong>{formatMoney(report.physical_closing_cash)}</strong><small>Verified cash drawer balance</small></div>
         </section>
 
@@ -191,7 +191,7 @@ export function DailyReportPrintPage() {
             ["MOMO", report.momo],
             ["Physical cash remaining", report.physical_closing_cash],
           ]} />
-          <p className="print-report-note">Ending cash = starting balance + net position − loan taken + loan paid.</p>
+          <p className="print-report-note">Ending cash = starting balance + net position. Loan taken and loan paid are shown separately.</p>
         </section>
 
         <section className="print-report-columns">

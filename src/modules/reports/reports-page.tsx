@@ -204,7 +204,6 @@ export function ReportsPage() {
             <SummaryCard title="Total inflow" value={formatMoney(report.total_inflow)} detail="All completed sales, including credit sales" />
             <SummaryCard title="Total outflow" value={formatMoney(report.total_outflow)} detail="All recorded operating expenses" />
             <SummaryCard title="Net position" value={formatMoney(report.net_position)} detail="Money received minus expenses" positive={report.net_position >= 0} />
-            <SummaryCard title="Ending cash" value={formatMoney(report.ending_cash)} detail="Starting balance adjusted for position and loans" />
             <SummaryCard title="Physical cash remaining" value={formatMoney(report.physical_closing_cash)} detail="Verified cash drawer balance" />
           </section>
 

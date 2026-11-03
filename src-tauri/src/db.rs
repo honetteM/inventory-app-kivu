@@ -3566,8 +3566,6 @@ pub fn daily_business_report(
     let loan_paid = customer_repayments;
     let ending_cash = opening_physical_cash
         .checked_add(net_position)
-        .and_then(|value| value.checked_sub(loan_taken))
-        .and_then(|value| value.checked_add(loan_paid))
         .ok_or_else(|| {
             DbError::InvalidInput("ending cash exceeds the supported range".to_string())
         })?;
@@ -9519,10 +9517,7 @@ mod tests {
         assert_eq!(report.loan_paid, 6_000);
         assert_eq!(report.bank, 0);
         assert_eq!(report.momo, 6_000);
-        assert_eq!(
-            report.ending_cash,
-            report.opening_physical_cash + 14_500 - 4_000 + 6_000
-        );
+        assert_eq!(report.ending_cash, report.opening_physical_cash + 14_500);
         assert_eq!(report.cash_received, 5_000);
         assert_eq!(report.cash_expenses, 500);
         assert_eq!(report.cash_transferred_to_bank, 0);
