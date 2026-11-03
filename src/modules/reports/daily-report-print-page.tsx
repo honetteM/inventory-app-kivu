@@ -37,6 +37,10 @@ interface DailyBusinessReport {
   loan_paid: number;
   bank: number;
   momo: number;
+  opening_customer_outstanding: number;
+  closing_customer_outstanding: number;
+  calculated_physical_cash: number;
+  cash_reconciliation_difference: number;
   loan_received: number;
   loan_repayments: number;
   other_receipts: number;
@@ -189,7 +193,14 @@ export function DailyReportPrintPage() {
             ["Loan paid", report.loan_paid],
             ["Bank", report.bank],
             ["MOMO", report.momo],
+            ["Supplier payments", -report.supplier_payments],
+            ...report.other_cash_outflows.map((outflow) => [
+              `${outflow.category} — ${outflow.description}`,
+              -outflow.amount,
+            ] as [string, number]),
+            ["Calculated physical cash", report.calculated_physical_cash],
             ["Physical cash remaining", report.physical_closing_cash],
+            ["Reconciliation difference", report.cash_reconciliation_difference],
           ]} />
           <p className="print-report-note">Ending cash = starting balance + net position. Loan taken and loan paid are shown separately.</p>
         </section>
@@ -207,6 +218,10 @@ export function DailyReportPrintPage() {
             <h2>Balances and obligations</h2>
             <PrintMoneyTable rows={[
               ["Customer outstanding", report.customer_outstanding],
+              ["Opening customer debt", report.opening_customer_outstanding],
+              ["Credit sales / loan taken", report.loan_taken],
+              ["Customer payments / loan paid", report.loan_paid],
+              ["Closing customer debt", report.closing_customer_outstanding],
               ["Supplier outstanding", report.supplier_outstanding],
               ["Loans received", report.loan_received],
               ["Loan repayments", report.loan_repayments],

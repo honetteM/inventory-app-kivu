@@ -3231,6 +3231,10 @@ pub struct DailyBusinessReport {
     pub loan_paid: i64,
     pub bank: i64,
     pub momo: i64,
+    pub opening_customer_outstanding: i64,
+    pub closing_customer_outstanding: i64,
+    pub calculated_physical_cash: i64,
+    pub cash_reconciliation_difference: i64,
     pub loan_received: i64,
     pub loan_repayments: i64,
     pub other_receipts: i64,
@@ -3562,7 +3566,23 @@ pub fn daily_business_report(
          FROM customer_debts d WHERE d.business_id = ?1",
         business_id,
     )?;
-    let loan_taken = customer_outstanding;
+    let opening_customer_outstanding: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(
+            d.original_amount
+            - COALESCE((SELECT SUM(sp.amount) FROM sale_payments sp
+                        WHERE sp.sale_id = d.sale_id
+                          AND date(sp.created_at, 'localtime') < ?2), 0)
+            - COALESCE((SELECT SUM(dp.amount) FROM customer_debt_payments dp
+                        WHERE dp.business_id = d.business_id AND dp.debt_id = d.id
+                          AND date(dp.created_at, 'localtime') < ?2), 0)
+         ), 0)
+         FROM customer_debts d
+         JOIN sales s ON s.id = d.sale_id AND s.business_id = d.business_id
+         WHERE d.business_id = ?1 AND date(s.created_at, 'localtime') < ?2",
+        params![business_id, report_date],
+        |row| row.get(0),
+    )?;
+    let loan_taken = credit_sales;
     let loan_paid = customer_repayments;
     let ending_cash = opening_physical_cash
         .checked_add(net_position)
@@ -3586,6 +3606,25 @@ pub fn daily_business_report(
         .checked_add(account_inflow("airtel_wallet")?)
         .ok_or_else(|| {
             DbError::InvalidInput("MOMO inflow exceeds the supported range".to_string())
+        })?;
+    let calculated_physical_cash = ending_cash
+        .checked_sub(loan_taken)
+        .and_then(|value| value.checked_add(loan_paid))
+        .and_then(|value| value.checked_sub(bank))
+        .and_then(|value| value.checked_sub(momo))
+        .and_then(|value| value.checked_sub(supplier_payments))
+        .and_then(|value| value.checked_sub(other_verified_cash_outflows))
+        .ok_or_else(|| {
+            DbError::InvalidInput(
+                "calculated physical cash exceeds the supported range".to_string(),
+            )
+        })?;
+    let cash_reconciliation_difference = calculated_physical_cash
+        .checked_sub(physical_closing_cash)
+        .ok_or_else(|| {
+            DbError::InvalidInput(
+                "cash reconciliation difference exceeds the supported range".to_string(),
+            )
         })?;
     let supplier_outstanding = report_business_amount(
         conn,
@@ -3636,6 +3675,10 @@ pub fn daily_business_report(
         loan_paid,
         bank,
         momo,
+        opening_customer_outstanding,
+        closing_customer_outstanding: customer_outstanding,
+        calculated_physical_cash,
+        cash_reconciliation_difference,
         loan_received,
         loan_repayments,
         other_receipts,
@@ -9513,10 +9556,17 @@ mod tests {
         assert_eq!(report.total_inflow, 15_000);
         assert_eq!(report.total_outflow, 500);
         assert_eq!(report.net_position, 14_500);
-        assert_eq!(report.loan_taken, 4_000);
+        assert_eq!(report.loan_taken, 10_000);
         assert_eq!(report.loan_paid, 6_000);
         assert_eq!(report.bank, 0);
         assert_eq!(report.momo, 6_000);
+        assert_eq!(report.opening_customer_outstanding, 0);
+        assert_eq!(report.closing_customer_outstanding, 4_000);
+        assert_eq!(
+            report.calculated_physical_cash,
+            report.physical_closing_cash
+        );
+        assert_eq!(report.cash_reconciliation_difference, 0);
         assert_eq!(report.ending_cash, report.opening_physical_cash + 14_500);
         assert_eq!(report.cash_received, 5_000);
         assert_eq!(report.cash_expenses, 500);

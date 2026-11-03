@@ -51,6 +51,10 @@ interface DailyBusinessReport {
   loan_paid: number;
   bank: number;
   momo: number;
+  opening_customer_outstanding: number;
+  closing_customer_outstanding: number;
+  calculated_physical_cash: number;
+  cash_reconciliation_difference: number;
   loan_received: number;
   loan_repayments: number;
   other_receipts: number;
@@ -234,7 +238,11 @@ export function ReportsPage() {
                 <tr className="border-b"><td className="py-2">Loan paid</td><td className="data-number py-2 text-right">{formatMoney(report.loan_paid)}</td></tr>
                 <tr className="border-b"><td className="py-2">Bank</td><td className="data-number py-2 text-right">{formatMoney(report.bank)}</td></tr>
                 <tr><td className="py-2">MOMO</td><td className="data-number py-2 text-right">{formatMoney(report.momo)}</td></tr>
+                <tr className="border-t"><td className="py-2">Supplier payments</td><td className="data-number py-2 text-right">{formatMoney(report.supplier_payments)}</td></tr>
+                {report.other_cash_outflows.map((outflow, index) => <tr key={`bridge-${outflow.category}-${outflow.description}-${index}`}><td className="py-2">{outflow.category} — {outflow.description}</td><td className="data-number py-2 text-right">{formatMoney(outflow.amount)}</td></tr>)}
+                <tr className="border-t"><td className="py-2">Calculated physical cash</td><td className="data-number py-2 text-right">{formatMoney(report.calculated_physical_cash)}</td></tr>
                 <tr className="border-t font-semibold"><td className="pt-3">Physical cash remaining</td><td className="data-number pt-3 text-right">{formatMoney(report.physical_closing_cash)}</td></tr>
+                <tr><td className="py-2">Reconciliation difference</td><td className="data-number py-2 text-right">{formatMoney(report.cash_reconciliation_difference)}</td></tr>
               </tbody></table>
             </CardContent>
           </Card>
@@ -243,6 +251,7 @@ export function ReportsPage() {
             <SummaryCard title="Sales value" value={formatMoney(report.sales_total)} detail={`${report.sale_count} completed sales; this is not all cash received`} />
             <SummaryCard title="Supplier payments" value={formatMoney(report.supplier_payments)} detail="Separate from operating expenses" />
             <SummaryCard title="Loan taken" value={formatMoney(report.loan_taken)} detail="Customer amount still unpaid" />
+            <SummaryCard title="Customer debt at close" value={formatMoney(report.closing_customer_outstanding)} detail="Outstanding customer balance" />
           </section>
 
           <p className="flex items-start gap-2 rounded-lg border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground"><WalletCards className="mt-0.5 size-4 shrink-0" />Net position is a cash-based management measure, not accounting profit. Loans and transfers are shown separately and are not treated as operating expenses.</p>
