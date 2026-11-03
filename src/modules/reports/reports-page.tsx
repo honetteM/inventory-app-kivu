@@ -44,6 +44,13 @@ interface DailyBusinessReport {
   cash_transferred_to_mobile_money: number;
   other_cash_outflows: CashOutflowBreakdown[];
   physical_closing_cash: number;
+  total_inflow: number;
+  total_outflow: number;
+  ending_cash: number;
+  loan_taken: number;
+  loan_paid: number;
+  bank: number;
+  momo: number;
   loan_received: number;
   loan_repayments: number;
   other_receipts: number;
@@ -194,9 +201,10 @@ export function ReportsPage() {
           </header>
 
           <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Daily calculation summary">
-            <SummaryCard title="Money received" value={formatMoney(report.money_received)} detail="Actual incoming business payments" />
-            <SummaryCard title="Recorded expenses" value={formatMoney(report.expenses_total)} detail="Operating expenses only" />
+            <SummaryCard title="Total inflow" value={formatMoney(report.total_inflow)} detail="All completed sales, including credit sales" />
+            <SummaryCard title="Total outflow" value={formatMoney(report.total_outflow)} detail="All recorded operating expenses" />
             <SummaryCard title="Net position" value={formatMoney(report.net_position)} detail="Money received minus expenses" positive={report.net_position >= 0} />
+            <SummaryCard title="Ending cash" value={formatMoney(report.ending_cash)} detail="Starting balance adjusted for position and loans" />
             <SummaryCard title="Physical cash remaining" value={formatMoney(report.physical_closing_cash)} detail="Verified cash drawer balance" />
           </section>
 
@@ -218,13 +226,16 @@ export function ReportsPage() {
             <CardHeader><CardTitle>Physical cash reconciliation</CardTitle><CardDescription>This is cash in the physical drawer, not total business assets and not profit.</CardDescription></CardHeader>
             <CardContent>
               <table className="w-full text-sm"><tbody>
-                <tr className="border-b"><td className="py-2">Opening physical cash</td><td className="data-number py-2 text-right">{formatMoney(report.opening_physical_cash)}</td></tr>
-                <tr className="border-b"><td className="py-2">+ Cash received</td><td className="data-number py-2 text-right">{formatMoney(report.cash_received)}</td></tr>
-                <tr className="border-b"><td className="py-2">− Cash expenses</td><td className="data-number py-2 text-right">{formatMoney(report.cash_expenses)}</td></tr>
-                <tr className="border-b"><td className="py-2">− Bank</td><td className="data-number py-2 text-right">{formatMoney(report.cash_transferred_to_bank)}</td></tr>
-                <tr className="border-b"><td className="py-2">− MOMO</td><td className="data-number py-2 text-right">{formatMoney(report.cash_transferred_to_mobile_money)}</td></tr>
-                {report.other_cash_outflows.map((outflow, index) => <tr className="border-b" key={`${outflow.category}-${outflow.description}-${index}`}><td className="py-2">− {outflow.category} — {outflow.description}</td><td className="data-number py-2 text-right">{formatMoney(outflow.amount)}</td></tr>)}
-                <tr className="font-semibold"><td className="pt-3">Physical closing cash</td><td className="data-number pt-3 text-right">{formatMoney(report.physical_closing_cash)}</td></tr>
+                <tr className="border-b"><td className="py-2">Starting balance</td><td className="data-number py-2 text-right">{formatMoney(report.opening_physical_cash)}</td></tr>
+                <tr className="border-b"><td className="py-2">Total inflow</td><td className="data-number py-2 text-right">{formatMoney(report.total_inflow)}</td></tr>
+                <tr className="border-b"><td className="py-2">Total outflow</td><td className="data-number py-2 text-right">{formatMoney(report.total_outflow)}</td></tr>
+                <tr className="border-b font-semibold"><td className="py-2">Net position</td><td className="data-number py-2 text-right">{formatMoney(report.net_position)}</td></tr>
+                <tr className="border-b font-semibold"><td className="py-2">Ending cash</td><td className="data-number py-2 text-right">{formatMoney(report.ending_cash)}</td></tr>
+                <tr className="border-b"><td className="py-2">Loan taken</td><td className="data-number py-2 text-right">{formatMoney(report.loan_taken)}</td></tr>
+                <tr className="border-b"><td className="py-2">Loan paid</td><td className="data-number py-2 text-right">{formatMoney(report.loan_paid)}</td></tr>
+                <tr className="border-b"><td className="py-2">Bank</td><td className="data-number py-2 text-right">{formatMoney(report.bank)}</td></tr>
+                <tr><td className="py-2">MOMO</td><td className="data-number py-2 text-right">{formatMoney(report.momo)}</td></tr>
+                <tr className="border-t font-semibold"><td className="pt-3">Physical cash remaining</td><td className="data-number pt-3 text-right">{formatMoney(report.physical_closing_cash)}</td></tr>
               </tbody></table>
             </CardContent>
           </Card>
@@ -232,7 +243,7 @@ export function ReportsPage() {
           <section className="grid gap-6 xl:grid-cols-3">
             <SummaryCard title="Sales value" value={formatMoney(report.sales_total)} detail={`${report.sale_count} completed sales; this is not all cash received`} />
             <SummaryCard title="Supplier payments" value={formatMoney(report.supplier_payments)} detail="Separate from operating expenses" />
-            <SummaryCard title="Customer debt outstanding" value={formatMoney(report.customer_outstanding)} detail="Unpaid customer balances at report time" />
+            <SummaryCard title="Loan taken" value={formatMoney(report.loan_taken)} detail="Customer amount still unpaid" />
           </section>
 
           <p className="flex items-start gap-2 rounded-lg border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground"><WalletCards className="mt-0.5 size-4 shrink-0" />Net position is a cash-based management measure, not accounting profit. Loans and transfers are shown separately and are not treated as operating expenses.</p>

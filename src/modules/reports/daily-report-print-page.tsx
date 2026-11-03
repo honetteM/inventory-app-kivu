@@ -30,6 +30,13 @@ interface DailyBusinessReport {
   cash_transferred_to_mobile_money: number;
   other_cash_outflows: CashOutflowBreakdown[];
   physical_closing_cash: number;
+  total_inflow: number;
+  total_outflow: number;
+  ending_cash: number;
+  loan_taken: number;
+  loan_paid: number;
+  bank: number;
+  momo: number;
   loan_received: number;
   loan_repayments: number;
   other_receipts: number;
@@ -137,9 +144,10 @@ export function DailyReportPrintPage() {
         </header>
 
         <section className="print-report-summary">
-          <div><span>Money received</span><strong>{formatMoney(report.money_received)}</strong><small>Actual incoming payments</small></div>
-          <div><span>Recorded expenses</span><strong>{formatMoney(report.expenses_total)}</strong><small>Operating expenses only</small></div>
+          <div><span>Total inflow</span><strong>{formatMoney(report.total_inflow)}</strong><small>All completed sales</small></div>
+          <div><span>Total outflow</span><strong>{formatMoney(report.total_outflow)}</strong><small>All operating expenses</small></div>
           <div className={report.net_position >= 0 ? "is-positive" : "is-negative"}><span>Net position</span><strong>{formatMoney(report.net_position)}</strong><small>Received less expenses</small></div>
+          <div><span>Ending cash</span><strong>{formatMoney(report.ending_cash)}</strong><small>Position adjusted for loans</small></div>
           <div><span>Physical cash remaining</span><strong>{formatMoney(report.physical_closing_cash)}</strong><small>Verified cash drawer balance</small></div>
         </section>
 
@@ -172,17 +180,18 @@ export function DailyReportPrintPage() {
           <h2>Physical cash reconciliation</h2>
           <p className="print-report-note">This calculation covers the physical cash drawer only.</p>
           <PrintMoneyTable rows={[
-            ["Opening physical cash", report.opening_physical_cash],
-            ["Cash received", report.cash_received],
-            ["Cash expenses paid", -report.cash_expenses],
-            ["Bank", -report.cash_transferred_to_bank],
-            ["MOMO", -report.cash_transferred_to_mobile_money],
-            ...report.other_cash_outflows.map((outflow) => [
-              `${outflow.category} — ${outflow.description}`,
-              -outflow.amount,
-            ] as [string, number]),
+            ["Starting balance", report.opening_physical_cash],
+            ["Total inflow", report.total_inflow],
+            ["Total outflow", -report.total_outflow],
+            ["Net position", report.net_position],
+            ["Ending cash", report.ending_cash],
+            ["Loan taken", -report.loan_taken],
+            ["Loan paid", report.loan_paid],
+            ["Bank", report.bank],
+            ["MOMO", report.momo],
+            ["Physical cash remaining", report.physical_closing_cash],
           ]} />
-          <p className="print-report-total print-report-total-emphasis"><span>Physical closing cash</span><strong>{formatMoney(report.physical_closing_cash)}</strong></p>
+          <p className="print-report-note">Ending cash = starting balance + net position − loan taken + loan paid.</p>
         </section>
 
         <section className="print-report-columns">

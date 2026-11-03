@@ -3224,6 +3224,13 @@ pub struct DailyBusinessReport {
     pub other_verified_cash_outflows: i64,
     pub other_cash_outflows: Vec<DailyCashOutflowBreakdown>,
     pub physical_closing_cash: i64,
+    pub total_inflow: i64,
+    pub total_outflow: i64,
+    pub ending_cash: i64,
+    pub loan_taken: i64,
+    pub loan_paid: i64,
+    pub bank: i64,
+    pub momo: i64,
     pub loan_received: i64,
     pub loan_repayments: i64,
     pub other_receipts: i64,
@@ -3483,7 +3490,9 @@ pub fn daily_business_report(
         business_id,
         report_date,
     )?;
-    let net_position = money_received.checked_sub(expenses_total).ok_or_else(|| {
+    let total_inflow = sales_total;
+    let total_outflow = expenses_total;
+    let net_position = total_inflow.checked_sub(total_outflow).ok_or_else(|| {
         DbError::InvalidInput("daily net position exceeds the supported range".to_string())
     })?;
     let mut expense_stmt = conn.prepare(
@@ -3553,6 +3562,33 @@ pub fn daily_business_report(
          FROM customer_debts d WHERE d.business_id = ?1",
         business_id,
     )?;
+    let loan_taken = customer_outstanding;
+    let loan_paid = customer_repayments;
+    let ending_cash = opening_physical_cash
+        .checked_add(net_position)
+        .and_then(|value| value.checked_sub(loan_taken))
+        .and_then(|value| value.checked_add(loan_paid))
+        .ok_or_else(|| {
+            DbError::InvalidInput("ending cash exceeds the supported range".to_string())
+        })?;
+    let account_inflow = |account_type: &str| -> Result<i64, DbError> {
+        Ok(conn.query_row(
+            "SELECT COALESCE(SUM(m.amount), 0)
+             FROM cash_movements m
+             JOIN cash_accounts a ON a.id = m.account_id AND a.business_id = m.business_id
+             WHERE m.business_id = ?1 AND a.account_type = ?2
+               AND m.direction = 'in'
+               AND date(m.occurred_at, 'localtime') = ?3",
+            params![business_id, account_type, report_date],
+            |row| row.get(0),
+        )?)
+    };
+    let bank = account_inflow("bank")?;
+    let momo = account_inflow("mtn_wallet")?
+        .checked_add(account_inflow("airtel_wallet")?)
+        .ok_or_else(|| {
+            DbError::InvalidInput("MOMO inflow exceeds the supported range".to_string())
+        })?;
     let supplier_outstanding = report_business_amount(
         conn,
         "SELECT COALESCE(SUM(
@@ -3595,6 +3631,13 @@ pub fn daily_business_report(
         other_verified_cash_outflows,
         other_cash_outflows,
         physical_closing_cash,
+        total_inflow,
+        total_outflow,
+        ending_cash,
+        loan_taken,
+        loan_paid,
+        bank,
+        momo,
         loan_received,
         loan_repayments,
         other_receipts,
@@ -9469,7 +9512,17 @@ mod tests {
         assert_eq!(report.business_name, "Hardware shop");
         assert_eq!(report.report_date, report_date);
         assert_eq!(report.money_received, 11_000);
-        assert_eq!(report.net_position, 10_500);
+        assert_eq!(report.total_inflow, 15_000);
+        assert_eq!(report.total_outflow, 500);
+        assert_eq!(report.net_position, 14_500);
+        assert_eq!(report.loan_taken, 4_000);
+        assert_eq!(report.loan_paid, 6_000);
+        assert_eq!(report.bank, 0);
+        assert_eq!(report.momo, 6_000);
+        assert_eq!(
+            report.ending_cash,
+            report.opening_physical_cash + 14_500 - 4_000 + 6_000
+        );
         assert_eq!(report.cash_received, 5_000);
         assert_eq!(report.cash_expenses, 500);
         assert_eq!(report.cash_transferred_to_bank, 0);
