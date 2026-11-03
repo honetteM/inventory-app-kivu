@@ -874,20 +874,6 @@ fn daily_business_report(
 }
 
 #[tauri::command]
-fn business_report(
-    state: tauri::State<db::DbState>,
-    business_id: String,
-    report_type: String,
-    anchor_date: String,
-) -> Result<db::BusinessReport, String> {
-    state
-        .with_business_permission(&business_id, db::PERMISSION_REPORTS_READ, |conn, _| {
-            db::business_report(conn, &business_id, &report_type, &anchor_date)
-        })
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 fn expense_create(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -1189,7 +1175,6 @@ pub fn run() {
             customer_statement,
             expense_list,
             daily_business_report,
-            business_report,
             expense_create,
             customer_debt_record_payment,
             purchase_product_list,
