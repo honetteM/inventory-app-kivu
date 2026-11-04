@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Building2, KeyRound, LoaderCircle, LogIn, UserRoundPlus } from "lucide-react";
+import { ArrowLeft, Building2, KeyRound, LoaderCircle, LogIn, UserRoundPlus } from "lucide-react";
 import { createContext, useContext, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,16 @@ interface BusinessStatus {
   id: string;
   name: string;
   requires_owner_setup: boolean;
+}
+
+interface RecoveryQuestion {
+  id: string;
+  label: string;
+}
+
+interface RecoveryPrompts {
+  question_one: string;
+  question_two: string;
 }
 
 interface AuthUser {
@@ -51,6 +61,14 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [fullName, setFullName] = useState("");
   const [password, setPassword] = useState("");
   const [passwordConfirmation, setPasswordConfirmation] = useState("");
+  const [recoveryCode, setRecoveryCode] = useState("");
+  const [recoveryQuestionOne, setRecoveryQuestionOne] = useState("");
+  const [recoveryAnswerOne, setRecoveryAnswerOne] = useState("");
+  const [recoveryQuestionTwo, setRecoveryQuestionTwo] = useState("");
+  const [recoveryAnswerTwo, setRecoveryAnswerTwo] = useState("");
+  const [recoveryQuestions, setRecoveryQuestions] = useState<RecoveryQuestion[]>([]);
+  const [recoveryPrompts, setRecoveryPrompts] = useState<RecoveryPrompts | null>(null);
+  const [isRecovery, setIsRecovery] = useState(false);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [permissions, setPermissions] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -72,8 +90,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
         }
 
         const result = await invoke<BusinessStatus[]>("auth_business_status");
+        const questions = await invoke<RecoveryQuestion[]>("auth_recovery_questions");
         if (active) {
           setBusinesses(result);
+          setRecoveryQuestions(questions);
+          setRecoveryQuestionOne(questions[0]?.id ?? "");
+          setRecoveryQuestionTwo(questions[1]?.id ?? "");
           setBusinessId(result[0]?.id ?? "");
           if (result.length === 0 || result[0]?.requires_owner_setup) {
             setUsername("admin");
@@ -104,13 +126,32 @@ export function AuthGate({ children }: { children: ReactNode }) {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
-    if (requiresOwnerSetup && password !== passwordConfirmation) {
+    if ((requiresOwnerSetup || isRecovery) && password !== passwordConfirmation) {
       setError("The password confirmation does not match.");
       return;
     }
 
     setIsSaving(true);
     try {
+      if (isRecovery) {
+        await invoke("auth_recover_owner", {
+          businessId,
+          username: username.trim(),
+          recoveryCode,
+          questionOneAnswer: recoveryAnswerOne,
+          questionTwoAnswer: recoveryAnswerTwo,
+          newPassword: password,
+        });
+        setIsRecovery(false);
+        setPassword("");
+        setPasswordConfirmation("");
+        setRecoveryCode("");
+        setRecoveryAnswerOne("");
+        setRecoveryAnswerTwo("");
+        setRecoveryPrompts(null);
+        setError("Password recovered. Sign in with your new password.");
+        return;
+      }
       const signedInUser = requiresOwnerSetup
         ? await invoke<AuthUser>("auth_bootstrap_owner", {
             businessId: isInitialBusinessSetup ? null : businessId,
@@ -118,6 +159,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
             username: username.trim(),
             fullName: fullName.trim(),
             password,
+            recoveryCode,
+            recoveryQuestionOne,
+            recoveryAnswerOne,
+            recoveryQuestionTwo,
+            recoveryAnswerTwo,
           })
         : await invoke<AuthUser>("auth_login", {
             businessId,
@@ -137,6 +183,27 @@ export function AuthGate({ children }: { children: ReactNode }) {
       );
     } finally {
       setIsSaving(false);
+    }
+
+  }
+
+  async function beginRecovery() {
+    setError(null);
+    setIsRecovery(true);
+    setPassword("");
+    setPasswordConfirmation("");
+    setRecoveryCode("");
+    setRecoveryAnswerOne("");
+    setRecoveryAnswerTwo("");
+    if (businessId && username.trim()) {
+      try {
+        setRecoveryPrompts(await invoke<RecoveryPrompts | null>("auth_recovery_prompts", {
+          businessId,
+          username: username.trim(),
+        }));
+      } catch (cause) {
+        setError(`Could not load recovery questions. ${errorText(cause)}`);
+      }
     }
   }
 
@@ -178,9 +245,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
               {requiresOwnerSetup ? <UserRoundPlus className="size-5" /> : <KeyRound className="size-5" />}
             </div>
             <div className="space-y-1">
-              <CardTitle>{requiresOwnerSetup ? "Set up Owner/Admin access" : "Sign in to your business"}</CardTitle>
+              <CardTitle>{isRecovery ? "Recover Owner/Admin access" : requiresOwnerSetup ? "Set up Owner/Admin access" : "Sign in to your business"}</CardTitle>
               <CardDescription>
-                {requiresOwnerSetup
+                {isRecovery
+                  ? "Verify your offline recovery code and security answers, then choose a new password."
+                  : requiresOwnerSetup
                   ? "Create the first Owner/Admin account. Choose a password; it is securely hashed on this device."
                   : "Owners and active Managers can sign in with their business username and password."}
               </CardDescription>
@@ -231,7 +300,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
                   </SelectField>
                 </div>
               )}
-              {requiresOwnerSetup ? (
+              {!isRecovery && requiresOwnerSetup ? (
                 <div className="space-y-2">
                   <Label htmlFor="auth-full-name">Owner/Admin full name</Label>
                   <Input
@@ -255,11 +324,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
                   value={username}
                   onChange={(event) => setUsername(event.target.value)}
                 />
-                {requiresOwnerSetup ? (
+                {!isRecovery && requiresOwnerSetup ? (
                   <p className="text-xs text-muted-foreground">The default username is admin; you can change it before creating the account.</p>
                 ) : null}
               </div>
-              <div className="space-y-2">
+              {!isRecovery && !requiresOwnerSetup ? <div className="space-y-2">
                 <Label htmlFor="auth-password">Password</Label>
                 <Input
                   id="auth-password"
@@ -274,20 +343,62 @@ export function AuthGate({ children }: { children: ReactNode }) {
                 {requiresOwnerSetup ? (
                   <p className="text-xs text-muted-foreground">Use at least 12 characters.</p>
                 ) : null}
-              </div>
-              {requiresOwnerSetup ? (
+              </div> : null}
+              {isRecovery ? (
+                <>
+                  <div className="space-y-2">
+                    <Label htmlFor="auth-recovery-code">Recovery code</Label>
+                    <Input id="auth-recovery-code" type="password" required value={recoveryCode} onChange={(event) => setRecoveryCode(event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="auth-recovery-answer-one">{recoveryPrompts?.question_one ?? "First security-question answer"}</Label>
+                    <Input id="auth-recovery-answer-one" required value={recoveryAnswerOne} onChange={(event) => setRecoveryAnswerOne(event.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="auth-recovery-answer-two">{recoveryPrompts?.question_two ?? "Second security-question answer"}</Label>
+                    <Input id="auth-recovery-answer-two" required value={recoveryAnswerTwo} onChange={(event) => setRecoveryAnswerTwo(event.target.value)} />
+                  </div>
+                </>
+              ) : null}
+              {(requiresOwnerSetup || isRecovery) ? (
                 <div className="space-y-2">
-                  <Label htmlFor="auth-password-confirmation">Confirm password</Label>
+                  <Label htmlFor="auth-password">{isRecovery ? "New password" : "Password"}</Label>
                   <Input
-                    id="auth-password-confirmation"
+                    id="auth-password"
                     type="password"
-                    autoComplete="new-password"
                     minLength={12}
                     maxLength={128}
                     required
-                    value={passwordConfirmation}
-                    onChange={(event) => setPasswordConfirmation(event.target.value)}
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
                   />
+                </div>
+              ) : null}
+              {(requiresOwnerSetup || isRecovery) ? (
+                <div className="space-y-2">
+                  <Label htmlFor="auth-password-confirmation">Confirm password</Label>
+                  <Input id="auth-password-confirmation" type="password" minLength={12} maxLength={128} required value={passwordConfirmation} onChange={(event) => setPasswordConfirmation(event.target.value)} />
+                </div>
+              ) : null}
+              {requiresOwnerSetup && !isRecovery ? (
+                <div className="grid gap-4 rounded-md border p-3">
+                  <p className="text-sm font-medium">Offline recovery setup</p>
+                  <div className="space-y-2">
+                    <Label htmlFor="auth-recovery-code">Recovery code</Label>
+                    <Input id="auth-recovery-code" type="password" required value={recoveryCode} onChange={(event) => setRecoveryCode(event.target.value)} />
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {[{ number: "one", value: recoveryQuestionOne, setValue: setRecoveryQuestionOne }, { number: "two", value: recoveryQuestionTwo, setValue: setRecoveryQuestionTwo }].map((question) => (
+                      <div className="space-y-2" key={question.number}>
+                        <Label>Security question {question.number}</Label>
+                        <SelectField value={question.value} onChange={(event) => question.setValue(event.target.value)}>
+                          {recoveryQuestions.filter((item) => item.id === question.value || item.id !== (question.number === "one" ? recoveryQuestionTwo : recoveryQuestionOne)).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                        </SelectField>
+                        <Input required placeholder="Answer" value={question.number === "one" ? recoveryAnswerOne : recoveryAnswerTwo} onChange={(event) => question.number === "one" ? setRecoveryAnswerOne(event.target.value) : setRecoveryAnswerTwo(event.target.value)} />
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">Keep the recovery code and answers safe. They are required to recover the Owner password without deleting data.</p>
                 </div>
               ) : null}
               <Button
@@ -296,9 +407,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
                 disabled={isSaving || (!businessId && !isInitialBusinessSetup)}
               >
                 {isSaving ? <LoaderCircle className="animate-spin" /> : requiresOwnerSetup ? <Building2 /> : <LogIn />}
-                {isSaving ? "Please wait..." : requiresOwnerSetup ? "Create Owner/Admin account" : "Sign in"}
+                {isSaving ? "Please wait..." : isRecovery ? "Reset Owner password" : requiresOwnerSetup ? "Create Owner/Admin account" : "Sign in"}
               </Button>
             </form>
+            {!requiresOwnerSetup && !isRecovery ? (
+              <Button variant="link" className="mt-3 w-full" type="button" onClick={() => void beginRecovery()}>Forgot Owner password?</Button>
+            ) : null}
+            {isRecovery ? (
+              <Button variant="ghost" className="mt-2 w-full" type="button" onClick={() => { setIsRecovery(false); setRecoveryPrompts(null); setError(null); }}><ArrowLeft />Back to sign in</Button>
+            ) : null}
           </CardContent>
         </Card>
       )}

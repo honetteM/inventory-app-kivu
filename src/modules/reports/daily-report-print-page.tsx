@@ -7,11 +7,6 @@ import { Button } from "@/components/ui/button";
 
 const MONEY_SCALE = 100n;
 
-interface AmountBreakdown {
-  category: string;
-  amount: number;
-}
-
 interface CashOutflowBreakdown {
   category: string;
   description: string;
@@ -21,10 +16,8 @@ interface CashOutflowBreakdown {
 interface DailyBusinessReport {
   business_name: string;
   report_date: string;
-  money_received: number;
   net_position: number;
   opening_physical_cash: number;
-  cash_received: number;
   cash_expenses: number;
   cash_transferred_to_bank: number;
   cash_transferred_to_mobile_money: number;
@@ -35,28 +28,27 @@ interface DailyBusinessReport {
   ending_cash: number;
   loan_taken: number;
   loan_paid: number;
-  bank: number;
-  momo: number;
-  opening_customer_outstanding: number;
-  closing_customer_outstanding: number;
+  cash_loan_paid: number;
+  bank_loan_paid: number;
+  momo_loan_paid: number;
+  cash_supplier_payments: number;
+  bank_supplier_payments: number;
+  momo_supplier_payments: number;
   calculated_physical_cash: number;
   cash_reconciliation_difference: number;
-  loan_received: number;
-  loan_repayments: number;
-  other_receipts: number;
-  sale_count: number;
-  sales_total: number;
-  sales_by_payment_method: AmountBreakdown[];
-  customer_repayments: number;
-  expenses_total: number;
-  expenses_by_category: AmountBreakdown[];
-  supplier_payments: number;
   customer_outstanding: number;
-  supplier_outstanding: number;
+}
+
+interface LedgerRow {
+  description: string;
+  amount: number;
+  destination: string;
+  emphasis?: boolean;
+  section?: boolean;
 }
 
 function formatMoney(value: number): string {
-  if (!Number.isSafeInteger(value)) return "—";
+  if (!Number.isSafeInteger(value)) return "NOT AVAILABLE";
   const amount = BigInt(value);
   const absolute = amount < 0n ? -amount : amount;
   const whole = absolute / MONEY_SCALE;
@@ -64,10 +56,6 @@ function formatMoney(value: number): string {
   return `${amount < 0n ? "−" : ""}${new Intl.NumberFormat("en-RW").format(Number(whole))}${
     fraction === 0n ? "" : `.${fraction.toString().padStart(2, "0")}`
   } RWF`;
-}
-
-function label(value: string): string {
-  return value.split("_").map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
 }
 
 function dateLabel(value: string): string {
@@ -82,12 +70,19 @@ function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-function PrintMoneyTable({ rows }: { rows: Array<[string, number]> }) {
+function LedgerTable({ rows }: { rows: LedgerRow[] }) {
   return (
-    <table className="print-report-table">
+    <table className="cashbook-table">
+      <thead>
+        <tr><th>Description</th><th>Amount</th><th>Balance / destination</th></tr>
+      </thead>
       <tbody>
-        {rows.map(([name, amount]) => (
-          <tr key={name}><td>{name}</td><td>{formatMoney(amount)}</td></tr>
+        {rows.map((row, index) => (
+          <tr className={`${row.emphasis ? "is-emphasis " : ""}${row.section ? "is-section" : ""}`} key={`${row.description}-${index}`}>
+            <td>{row.description}</td>
+            <td>{formatMoney(row.amount)}</td>
+            <td>{row.destination}</td>
+          </tr>
         ))}
       </tbody>
     </table>
@@ -111,19 +106,44 @@ export function DailyReportPrintPage() {
       .catch((cause) => setError(`Could not calculate the report. ${errorText(cause)}`));
   }, [businessId, reportDate]);
 
+  useEffect(() => {
+    document.title = "KIVU_SUBLIME_DAILY_CASHBOOK_REPORT";
+    return () => {
+      document.title = "Quincaillerie Manager";
+    };
+  }, []);
+
   if (error) {
     return <main className="print-report-error"><p>{error}</p><Link to="/reports">Return to Reports</Link></main>;
   }
-
   if (!report) {
     return <main className="print-report-loading"><LoaderCircle className="animate-spin" /> Preparing printable report...</main>;
   }
 
-  const incomingRows: Array<[string, number]> = [
-    ...report.sales_by_payment_method.map((item) => [label(item.category), item.amount] as [string, number]),
-    ...(report.customer_repayments ? [["Customer repayments", report.customer_repayments] as [string, number]] : []),
-    ...(report.loan_received ? [["Loans received", report.loan_received] as [string, number]] : []),
-    ...(report.other_receipts ? [["Other receipts", report.other_receipts] as [string, number]] : []),
+  const rows: LedgerRow[] = [
+    { description: "STARTING BALANCE", amount: report.opening_physical_cash, destination: "Physical cash", emphasis: true },
+    { description: "TOTAL INFLOW", amount: report.total_inflow, destination: "Completed sales", emphasis: true },
+    { description: "TOTAL OUTFLOW", amount: -report.total_outflow, destination: "Operating expenses", emphasis: true },
+    { description: "NET POSITION", amount: report.net_position, destination: "Inflow − outflow", emphasis: true },
+    { description: "ENDING CASH", amount: report.ending_cash, destination: "Starting balance + net position", emphasis: true },
+    { description: "LOAN TAKEN", amount: -report.loan_taken, destination: `After loan: ${formatMoney(report.ending_cash - report.loan_taken)}` },
+    { description: "LOAN PAID — CASH", amount: report.cash_loan_paid, destination: "Physical cash" },
+    { description: "LOAN PAID — BANK", amount: report.bank_loan_paid, destination: "Bank" },
+    { description: "LOAN PAID — MOMO", amount: report.momo_loan_paid, destination: "MOMO" },
+    { description: "VERSEMENT", amount: 0, destination: "Confirmed transfers from physical cash", section: true },
+    { description: "BANK", amount: -report.cash_transferred_to_bank, destination: "Cash → BANK" },
+    { description: "MOMO", amount: -report.cash_transferred_to_mobile_money, destination: "Cash → MOMO" },
+    { description: "SUPPLIER PAYMENTS", amount: 0, destination: "Actual payments during period", section: true },
+    { description: "CASH", amount: -report.cash_supplier_payments, destination: "Physical cash" },
+    { description: "BANK", amount: -report.bank_supplier_payments, destination: "Bank" },
+    { description: "MOMO", amount: -report.momo_supplier_payments, destination: "MOMO" },
+    ...report.other_cash_outflows.map((outflow) => ({
+      description: `OTHER CASH OUTFLOW — ${outflow.description}`,
+      amount: -outflow.amount,
+      destination: outflow.category,
+    })),
+    { description: "CLOSING BALANCE", amount: report.physical_closing_cash, destination: "Actual physical cash ledger", emphasis: true },
+    { description: "RECONCILIATION DIFFERENCE", amount: report.cash_reconciliation_difference, destination: "Expected physical cash − actual ledger", emphasis: true },
   ];
 
   return (
@@ -133,105 +153,32 @@ export function DailyReportPrintPage() {
         <Button variant="outline" onClick={() => window.print()}><Printer />Print</Button>
         <Button onClick={() => window.print()}><Download />Download PDF</Button>
       </div>
-
       <article className="print-report-document">
-        <header className="print-report-header">
+        <header className="cashbook-header">
           <div>
-            <p className="print-report-kicker">Daily business report</p>
+            <p className="print-report-kicker">Daily cashbook reconciliation</p>
             <h1>{report.business_name}</h1>
-            <p>Financial calculation and physical cash reconciliation</p>
+            <p>Combined financial statement · RWF</p>
           </div>
           <div className="print-report-meta">
             <span>Reporting date</span>
             <strong>{dateLabel(report.report_date)}</strong>
           </div>
         </header>
-
-        <section className="print-report-summary">
-          <div><span>Total inflow</span><strong>{formatMoney(report.total_inflow)}</strong><small>All completed sales</small></div>
-          <div><span>Total outflow</span><strong>{formatMoney(report.total_outflow)}</strong><small>All operating expenses</small></div>
-          <div className={report.net_position >= 0 ? "is-positive" : "is-negative"}><span>Net position</span><strong>{formatMoney(report.net_position)}</strong><small>Received less expenses</small></div>
-          <div><span>Ending cash</span><strong>{formatMoney(report.ending_cash)}</strong><small>Starting balance plus net position</small></div>
-          <div><span>Physical cash remaining</span><strong>{formatMoney(report.physical_closing_cash)}</strong><small>Verified cash drawer balance</small></div>
+        <section className="cashbook-ledger">
+          <LedgerTable rows={rows} />
         </section>
-
-        <section className="print-report-section">
-          <h2>Executive explanation</h2>
+        <section className={`cashbook-status ${report.cash_reconciliation_difference === 0 ? "is-balanced" : "is-unbalanced"}`}>
+          <strong>{report.cash_reconciliation_difference === 0 ? "RECONCILIATION BALANCED" : "RECONCILIATION DIFFERENCE IDENTIFIED"}</strong>
           <p>
-            On {dateLabel(report.report_date)}, the business received {formatMoney(report.money_received)} and recorded
-            {" "}{formatMoney(report.expenses_total)} in operating expenses. The calculated net position was
-            {" "}{formatMoney(report.net_position)}. This net position is a cash-based management measure and is not
-            presented as accounting profit.
+            Expected physical cash: {formatMoney(report.calculated_physical_cash)} · Actual ledger closing balance: {formatMoney(report.physical_closing_cash)}.
+            Customer debt closing balance: {formatMoney(report.customer_outstanding)}.
           </p>
+          <p>Bank and MOMO customer receipts, repayments, expenses, supplier payments, and balances remain account-specific and are not deducted from physical cash unless paid from the cash drawer.</p>
         </section>
-
-        <div className="print-report-columns">
-          <section className="print-report-section">
-            <h2>Money received</h2>
-            <p className="print-report-note">Incoming sources counted once from recorded payments.</p>
-            <PrintMoneyTable rows={incomingRows} />
-            <p className="print-report-total"><span>Total received</span><strong>{formatMoney(report.money_received)}</strong></p>
-          </section>
-          <section className="print-report-section">
-            <h2>Expenses by category</h2>
-            <p className="print-report-note">Transfers and supplier payments are excluded from expenses.</p>
-            <PrintMoneyTable rows={report.expenses_by_category.map((item) => [label(item.category), item.amount])} />
-            <p className="print-report-total"><span>Total expenses</span><strong>{formatMoney(report.expenses_total)}</strong></p>
-          </section>
-        </div>
-
-        <section className="print-report-section">
-          <h2>Physical cash reconciliation</h2>
-          <p className="print-report-note">This calculation covers the physical cash drawer only.</p>
-          <PrintMoneyTable rows={[
-            ["Starting balance", report.opening_physical_cash],
-            ["Total inflow", report.total_inflow],
-            ["Total outflow", -report.total_outflow],
-            ["Net position", report.net_position],
-            ["Ending cash", report.ending_cash],
-            ["Loan taken", -report.loan_taken],
-            ["Loan paid", report.loan_paid],
-            ["Bank", report.bank],
-            ["MOMO", report.momo],
-            ["Supplier payments", -report.supplier_payments],
-            ...report.other_cash_outflows.map((outflow) => [
-              `${outflow.category} — ${outflow.description}`,
-              -outflow.amount,
-            ] as [string, number]),
-            ["Calculated physical cash", report.calculated_physical_cash],
-            ["Physical cash remaining", report.physical_closing_cash],
-            ["Reconciliation difference", report.cash_reconciliation_difference],
-          ]} />
-          <p className="print-report-note">Ending cash = starting balance + net position. Loan taken and loan paid are shown separately.</p>
-        </section>
-
-        <section className="print-report-columns">
-          <section className="print-report-section">
-            <h2>Business activity</h2>
-            <PrintMoneyTable rows={[
-              ["Sales value", report.sales_total],
-              ["Supplier payments", report.supplier_payments],
-            ]} />
-            <p className="print-report-note">{report.sale_count.toLocaleString("en-RW")} completed sales recorded on this date.</p>
-          </section>
-          <section className="print-report-section">
-            <h2>Balances and obligations</h2>
-            <PrintMoneyTable rows={[
-              ["Customer outstanding", report.customer_outstanding],
-              ["Opening customer debt", report.opening_customer_outstanding],
-              ["Credit sales / loan taken", report.loan_taken],
-              ["Customer payments / loan paid", report.loan_paid],
-              ["Closing customer debt", report.closing_customer_outstanding],
-              ["Supplier outstanding", report.supplier_outstanding],
-              ["Loans received", report.loan_received],
-              ["Loan repayments", report.loan_repayments],
-            ]} />
-          </section>
-        </section>
-
         <footer className="print-report-footer">
           <span>Generated from verified application records</span>
-          <span>Daily report · {report.report_date}</span>
+          <span>KIVU SUBLIME · {report.report_date}</span>
         </footer>
       </article>
     </main>

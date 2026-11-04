@@ -101,6 +101,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "021_account_backed_expenses",
         include_str!("../migrations/021_account_backed_expenses.sql"),
     ),
+    (
+        22,
+        "022_owner_recovery",
+        include_str!("../migrations/022_owner_recovery.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -656,6 +661,113 @@ pub struct AuthCredentials {
     pub password_hash: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+pub struct RecoveryQuestion {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct RecoveryPrompts {
+    pub question_one: String,
+    pub question_two: String,
+}
+
+#[derive(Debug)]
+pub struct OwnerRecoveryCredentials {
+    pub user: AuthUser,
+    pub recovery_code_hash: Option<String>,
+    pub question_one: Option<String>,
+    pub answer_one_hash: Option<String>,
+    pub question_two: Option<String>,
+    pub answer_two_hash: Option<String>,
+}
+
+pub const RECOVERY_QUESTIONS: &[(&str, &str)] = &[
+    ("childhood_city", "What city were you born in?"),
+    ("first_school", "What was the name of your first school?"),
+    (
+        "favorite_teacher",
+        "What was the name of your favorite teacher?",
+    ),
+    ("first_pet", "What was the name of your first pet?"),
+    ("favorite_food", "What was your favorite food as a child?"),
+];
+
+pub fn recovery_questions() -> Vec<RecoveryQuestion> {
+    RECOVERY_QUESTIONS
+        .iter()
+        .map(|(id, label)| RecoveryQuestion {
+            id: (*id).to_string(),
+            label: (*label).to_string(),
+        })
+        .collect()
+}
+
+pub fn owner_recovery_prompts(
+    conn: &Connection,
+    business_id: &str,
+    username: &str,
+) -> Result<Option<RecoveryPrompts>, DbError> {
+    let credentials = owner_recovery_credentials(conn, business_id, username)?;
+    let Some(credentials) = credentials else {
+        return Ok(None);
+    };
+    let (Some(question_one), Some(question_two)) =
+        (credentials.question_one, credentials.question_two)
+    else {
+        return Ok(None);
+    };
+    let label = |id: &str| {
+        RECOVERY_QUESTIONS
+            .iter()
+            .find(|(known_id, _)| *known_id == id)
+            .map(|(_, label)| (*label).to_string())
+    };
+    Ok(Some(RecoveryPrompts {
+        question_one: label(&question_one).ok_or_else(|| {
+            DbError::InvalidInput("stored recovery question is invalid".to_string())
+        })?,
+        question_two: label(&question_two).ok_or_else(|| {
+            DbError::InvalidInput("stored recovery question is invalid".to_string())
+        })?,
+    }))
+}
+
+fn valid_recovery_question(id: &str) -> bool {
+    RECOVERY_QUESTIONS
+        .iter()
+        .any(|(known_id, _)| *known_id == id)
+}
+
+fn validate_recovery_setup(
+    recovery_code_hash: &str,
+    question_one: &str,
+    answer_one_hash: &str,
+    question_two: &str,
+    answer_two_hash: &str,
+) -> Result<(), DbError> {
+    if recovery_code_hash.trim().is_empty()
+        || answer_one_hash.trim().is_empty()
+        || answer_two_hash.trim().is_empty()
+    {
+        return Err(DbError::InvalidInput(
+            "recovery code and answers are required".to_string(),
+        ));
+    }
+    if !valid_recovery_question(question_one) || !valid_recovery_question(question_two) {
+        return Err(DbError::InvalidInput(
+            "select valid recovery questions".to_string(),
+        ));
+    }
+    if question_one == question_two {
+        return Err(DbError::InvalidInput(
+            "recovery questions must be different".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn auth_business_status(conn: &Connection) -> Result<Vec<AuthBusinessStatus>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT b.id, b.name,
@@ -696,6 +808,7 @@ fn validate_auth_identity(username: &str, full_name: &str) -> Result<(String, St
     Ok((username, full_name.to_string()))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn bootstrap_owner(
     conn: &Connection,
     business_id: Option<&str>,
@@ -704,11 +817,55 @@ pub fn bootstrap_owner(
     full_name: &str,
     password_hash: &str,
 ) -> Result<AuthUser, DbError> {
+    bootstrap_owner_with_recovery(
+        conn,
+        business_id,
+        new_business_name,
+        username,
+        full_name,
+        password_hash,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+}
+
+pub fn bootstrap_owner_with_recovery(
+    conn: &Connection,
+    business_id: Option<&str>,
+    new_business_name: Option<&str>,
+    username: &str,
+    full_name: &str,
+    password_hash: &str,
+    recovery_code_hash: Option<&str>,
+    recovery_question_one: Option<&str>,
+    recovery_answer_one_hash: Option<&str>,
+    recovery_question_two: Option<&str>,
+    recovery_answer_two_hash: Option<&str>,
+) -> Result<AuthUser, DbError> {
     let (username, full_name) = validate_auth_identity(username, full_name)?;
     if password_hash.trim().is_empty() {
         return Err(DbError::InvalidInput(
             "a valid password hash is required".to_string(),
         ));
+    }
+    let recovery_values = [
+        recovery_code_hash,
+        recovery_question_one,
+        recovery_answer_one_hash,
+        recovery_question_two,
+        recovery_answer_two_hash,
+    ];
+    if recovery_values.iter().any(Option::is_some) {
+        validate_recovery_setup(
+            recovery_code_hash.unwrap_or_default(),
+            recovery_question_one.unwrap_or_default(),
+            recovery_answer_one_hash.unwrap_or_default(),
+            recovery_question_two.unwrap_or_default(),
+            recovery_answer_two_hash.unwrap_or_default(),
+        )?;
     }
 
     let tx = conn.unchecked_transaction()?;
@@ -772,19 +929,50 @@ pub fn bootstrap_owner(
     grant_owner_permissions(&tx, &role_id)?;
     let user_id = uuid::Uuid::new_v4().to_string();
     let timestamp = now_utc();
-    tx.execute(
-        "INSERT INTO users
-            (id, business_id, username, full_name, password_hash, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-        params![
-            user_id,
-            business_id,
-            username,
-            full_name,
-            password_hash,
-            timestamp
-        ],
+    let recovery_columns_exist: bool = tx.query_row(
+        "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('users')
+                WHERE name = 'recovery_code_hash'
+            )",
+        [],
+        |row| row.get(0),
     )?;
+    if recovery_columns_exist {
+        tx.execute(
+            "INSERT INTO users
+                    (id, business_id, username, full_name, password_hash,
+                     recovery_code_hash, recovery_question_one, recovery_answer_one_hash,
+                     recovery_question_two, recovery_answer_two_hash, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+            params![
+                user_id,
+                business_id,
+                username,
+                full_name,
+                password_hash,
+                recovery_code_hash,
+                recovery_question_one,
+                recovery_answer_one_hash,
+                recovery_question_two,
+                recovery_answer_two_hash,
+                timestamp
+            ],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO users
+                    (id, business_id, username, full_name, password_hash, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![
+                user_id,
+                business_id,
+                username,
+                full_name,
+                password_hash,
+                timestamp
+            ],
+        )?;
+    }
     tx.execute(
         "INSERT INTO user_roles (id, user_id, role_id, created_at)
          VALUES (?1, ?2, ?3, ?4)",
@@ -958,6 +1146,83 @@ pub fn auth_credentials(
         )
         .optional()?;
     Ok(result)
+}
+
+pub fn owner_recovery_credentials(
+    conn: &Connection,
+    business_id: &str,
+    username: &str,
+) -> Result<Option<OwnerRecoveryCredentials>, DbError> {
+    let username = username.trim().to_ascii_lowercase();
+    conn.query_row(
+        "SELECT u.id, u.business_id, u.username, u.full_name,
+                u.recovery_code_hash, u.recovery_question_one,
+                u.recovery_answer_one_hash, u.recovery_question_two,
+                u.recovery_answer_two_hash
+         FROM users u
+         JOIN user_roles ur ON ur.user_id = u.id
+         JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
+         WHERE u.business_id = ?1 AND u.username = ?2 AND u.is_active = 1
+           AND r.name = 'owner'
+         LIMIT 1",
+        params![business_id, username],
+        |row| {
+            Ok(OwnerRecoveryCredentials {
+                user: AuthUser {
+                    id: row.get(0)?,
+                    business_id: row.get(1)?,
+                    username: row.get(2)?,
+                    full_name: row.get(3)?,
+                    role: "owner".to_string(),
+                },
+                recovery_code_hash: row.get(4)?,
+                question_one: row.get(5)?,
+                answer_one_hash: row.get(6)?,
+                question_two: row.get(7)?,
+                answer_two_hash: row.get(8)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(DbError::from)
+}
+
+pub fn reset_owner_password_after_recovery(
+    conn: &Connection,
+    user: &AuthUser,
+    password_hash: &str,
+) -> Result<(), DbError> {
+    if user.role != "owner" || password_hash.trim().is_empty() {
+        return Err(DbError::InvalidInput(
+            "a valid owner recovery request is required".to_string(),
+        ));
+    }
+    let timestamp = now_utc();
+    let tx = conn.unchecked_transaction()?;
+    let updated = tx.execute(
+        "UPDATE users SET password_hash = ?1, updated_at = ?2
+         WHERE id = ?3 AND business_id = ?4 AND is_active = 1",
+        params![password_hash, timestamp, user.id, user.business_id],
+    )?;
+    if updated != 1 {
+        return Err(DbError::InvalidInput(
+            "owner account is inactive or no longer exists".to_string(),
+        ));
+    }
+    tx.execute(
+        "INSERT INTO audit_logs
+            (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, NULL, 'owner_password_recovered', 'user', ?3,
+                 'Password changed using offline recovery verification', ?4)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            user.business_id,
+            user.id,
+            timestamp
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub fn record_successful_login(conn: &Connection, user: &AuthUser) -> Result<(), DbError> {
@@ -3229,6 +3494,9 @@ pub struct DailyBusinessReport {
     pub ending_cash: i64,
     pub loan_taken: i64,
     pub loan_paid: i64,
+    pub cash_loan_paid: i64,
+    pub bank_loan_paid: i64,
+    pub momo_loan_paid: i64,
     pub bank: i64,
     pub momo: i64,
     pub opening_customer_outstanding: i64,
@@ -3246,6 +3514,9 @@ pub struct DailyBusinessReport {
     pub expenses_total: i64,
     pub expenses_by_category: Vec<DailyAmountBreakdown>,
     pub supplier_payments: i64,
+    pub cash_supplier_payments: i64,
+    pub bank_supplier_payments: i64,
+    pub momo_supplier_payments: i64,
     pub purchases_received: i64,
     pub cost_of_goods_sold: i64,
     pub gross_profit: i64,
@@ -3519,6 +3790,29 @@ pub fn daily_business_report(
         business_id,
         report_date,
     )?;
+    let account_movement_sum = |movement_type: &str, account_types: &str| -> Result<i64, DbError> {
+        let sql = format!(
+            "SELECT COALESCE(SUM(m.amount), 0)
+             FROM cash_movements m
+             JOIN cash_accounts a ON a.id = m.account_id AND a.business_id = m.business_id
+             WHERE m.business_id = ?1 AND m.movement_type = ?2
+               AND a.account_type IN ({account_types})
+               AND date(m.occurred_at, 'localtime') = ?3"
+        );
+        Ok(conn.query_row(
+            &sql,
+            params![business_id, movement_type, report_date],
+            |row| row.get(0),
+        )?)
+    };
+    let cash_loan_paid = account_movement_sum("customer_repayment", "'cash_drawer'")?;
+    let bank_loan_paid = account_movement_sum("customer_repayment", "'bank'")?;
+    let momo_loan_paid =
+        account_movement_sum("customer_repayment", "'mtn_wallet', 'airtel_wallet'")?;
+    let cash_supplier_payments = account_movement_sum("supplier_payment", "'cash_drawer'")?;
+    let bank_supplier_payments = account_movement_sum("supplier_payment", "'bank'")?;
+    let momo_supplier_payments =
+        account_movement_sum("supplier_payment", "'mtn_wallet', 'airtel_wallet'")?;
     let purchases_received = report_amount(
         conn,
         "SELECT COALESCE(SUM(pri.total_cost), 0)
@@ -3607,12 +3901,16 @@ pub fn daily_business_report(
         .ok_or_else(|| {
             DbError::InvalidInput("MOMO inflow exceeds the supported range".to_string())
         })?;
-    let calculated_physical_cash = ending_cash
-        .checked_sub(loan_taken)
-        .and_then(|value| value.checked_add(loan_paid))
-        .and_then(|value| value.checked_sub(bank))
-        .and_then(|value| value.checked_sub(momo))
-        .and_then(|value| value.checked_sub(supplier_payments))
+    let cash_sales = account_movement_sum("sale_collection", "'cash_drawer'")?;
+    let cash_other_receipts = account_movement_sum("other_receipt", "'cash_drawer'")?;
+    let calculated_physical_cash = opening_physical_cash
+        .checked_add(cash_sales)
+        .and_then(|value| value.checked_add(cash_loan_paid))
+        .and_then(|value| value.checked_add(cash_other_receipts))
+        .and_then(|value| value.checked_sub(cash_expenses))
+        .and_then(|value| value.checked_sub(cash_supplier_payments))
+        .and_then(|value| value.checked_sub(cash_transferred_to_bank))
+        .and_then(|value| value.checked_sub(cash_transferred_to_mobile_money))
         .and_then(|value| value.checked_sub(other_verified_cash_outflows))
         .ok_or_else(|| {
             DbError::InvalidInput(
@@ -3673,6 +3971,9 @@ pub fn daily_business_report(
         ending_cash,
         loan_taken,
         loan_paid,
+        cash_loan_paid,
+        bank_loan_paid,
+        momo_loan_paid,
         bank,
         momo,
         opening_customer_outstanding,
@@ -3690,6 +3991,9 @@ pub fn daily_business_report(
         expenses_total,
         expenses_by_category,
         supplier_payments,
+        cash_supplier_payments,
+        bank_supplier_payments,
+        momo_supplier_payments,
         purchases_received,
         cost_of_goods_sold,
         gross_profit,

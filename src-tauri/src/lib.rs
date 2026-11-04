@@ -5,6 +5,8 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use rand_core::OsRng;
+use std::fs;
+use std::path::Path;
 use tauri::Manager;
 
 fn hash_password(password: &str) -> Result<String, String> {
@@ -21,6 +23,18 @@ fn verify_password(password: &str, password_hash: &str) -> Result<(), String> {
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .map_err(|_| "business, username or password is incorrect".to_string())
+}
+
+fn normalize_recovery_answer(answer: &str) -> String {
+    answer.trim().to_ascii_lowercase()
+}
+
+fn validate_recovery_input(value: &str, label: &str) -> Result<(), String> {
+    let length = value.trim().chars().count();
+    if !(3..=128).contains(&length) {
+        return Err(format!("{label} must be 3-128 characters long"));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -40,20 +54,37 @@ fn auth_bootstrap_owner(
     username: String,
     full_name: String,
     password: String,
+    recovery_code: String,
+    recovery_question_one: String,
+    recovery_answer_one: String,
+    recovery_question_two: String,
+    recovery_answer_two: String,
 ) -> Result<db::AuthUser, String> {
     if password.chars().count() < 12 || password.chars().count() > 128 {
         return Err("password must be 12-128 characters long".to_string());
     }
+
+    validate_recovery_input(&recovery_code, "recovery code")?;
+    validate_recovery_input(&recovery_answer_one, "first answer")?;
+    validate_recovery_input(&recovery_answer_two, "second answer")?;
+    let recovery_code_hash = hash_password(&recovery_code)?;
+    let recovery_answer_one_hash = hash_password(&normalize_recovery_answer(&recovery_answer_one))?;
+    let recovery_answer_two_hash = hash_password(&normalize_recovery_answer(&recovery_answer_two))?;
     let password_hash = hash_password(&password)?;
     let user = state
         .with_public(|conn| {
-            db::bootstrap_owner(
+            db::bootstrap_owner_with_recovery(
                 conn,
                 business_id.as_deref(),
                 new_business_name.as_deref(),
                 &username,
                 &full_name,
                 &password_hash,
+                Some(&recovery_code_hash),
+                Some(&recovery_question_one),
+                Some(&recovery_answer_one_hash),
+                Some(&recovery_question_two),
+                Some(&recovery_answer_two_hash),
             )
         })
         .map_err(|error| error.to_string())?;
@@ -61,6 +92,65 @@ fn auth_bootstrap_owner(
         .set_session(user.clone())
         .map_err(|error| error.to_string())?;
     Ok(user)
+}
+
+#[tauri::command]
+fn auth_recovery_questions() -> Vec<db::RecoveryQuestion> {
+    db::recovery_questions()
+}
+
+#[tauri::command]
+fn auth_recovery_prompts(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    username: String,
+) -> Result<Option<db::RecoveryPrompts>, String> {
+    state
+        .with_public(|conn| db::owner_recovery_prompts(conn, &business_id, &username))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn auth_recover_owner(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    username: String,
+    recovery_code: String,
+    question_one_answer: String,
+    question_two_answer: String,
+    new_password: String,
+) -> Result<(), String> {
+    if new_password.chars().count() < 12 || new_password.chars().count() > 128 {
+        return Err("password must be 12-128 characters long".to_string());
+    }
+    validate_recovery_input(&recovery_code, "recovery code")?;
+    validate_recovery_input(&question_one_answer, "first answer")?;
+    validate_recovery_input(&question_two_answer, "second answer")?;
+    let credentials = state
+        .with_public(|conn| db::owner_recovery_credentials(conn, &business_id, &username))
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "recovery details are incorrect".to_string())?;
+    let Some(recovery_code_hash) = credentials.recovery_code_hash.as_deref() else {
+        return Err("offline recovery has not been configured for this Owner account".to_string());
+    };
+    verify_password(&recovery_code, recovery_code_hash)
+        .map_err(|_| "recovery details are incorrect".to_string())?;
+    verify_password(
+        &normalize_recovery_answer(&question_one_answer),
+        credentials.answer_one_hash.as_deref().unwrap_or_default(),
+    )
+    .map_err(|_| "recovery details are incorrect".to_string())?;
+    verify_password(
+        &normalize_recovery_answer(&question_two_answer),
+        credentials.answer_two_hash.as_deref().unwrap_or_default(),
+    )
+    .map_err(|_| "recovery details are incorrect".to_string())?;
+    let password_hash = hash_password(&new_password)?;
+    state
+        .with_public(|conn| {
+            db::reset_owner_password_after_recovery(conn, &credentials.user, &password_hash)
+        })
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -74,6 +164,7 @@ fn auth_login(
     if password.chars().count() > 128 {
         return Err("business, username or password is incorrect".to_string());
     }
+
     let credentials = state
         .with_public(|conn| db::auth_credentials(conn, &business_id, &username))
         .map_err(|error| error.to_string())?
@@ -86,6 +177,107 @@ fn auth_login(
         .set_session(credentials.user.clone())
         .map_err(|error| error.to_string())?;
     Ok(credentials.user)
+}
+
+fn validate_sqlite_backup(path: &Path) -> Result<(), String> {
+    let connection = rusqlite::Connection::open(path)
+        .map_err(|error| format!("could not open the backup: {error}"))?;
+    let result: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|error| format!("could not validate the backup: {error}"))?;
+    if result != "ok" {
+        return Err(format!("backup integrity check failed: {result}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn database_backup(
+    app: tauri::AppHandle,
+    state: tauri::State<db::DbState>,
+    destination: String,
+) -> Result<(), String> {
+    let destination_path = Path::new(&destination);
+    if destination_path
+        .extension()
+        .and_then(|value| value.to_str())
+        != Some("db")
+    {
+        return Err("backup files must use the .db extension".to_string());
+    }
+    let source = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("could not locate application data: {error}"))?
+        .join("quincaillerie.db");
+    state
+        .with_authenticated(|conn, user| {
+            if user.role != "owner" {
+                return Err(db::DbError::InvalidInput(
+                    "only an Owner can create a database backup".to_string(),
+                ));
+            }
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            fs::copy(&source, destination_path)?;
+            conn.execute(
+                "INSERT INTO audit_logs
+                 (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+                 VALUES (?1, ?2, ?3, 'database_backup_created', 'database', ?1, ?4, ?5)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    user.business_id,
+                    user.id,
+                    destination,
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn database_restore(
+    app: tauri::AppHandle,
+    state: tauri::State<db::DbState>,
+    source: String,
+) -> Result<(), String> {
+    let source_path = Path::new(&source);
+    if !source_path.is_file() {
+        return Err("the selected backup file does not exist".to_string());
+    }
+    validate_sqlite_backup(source_path)?;
+    let destination = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("could not locate application data: {error}"))?
+        .join("quincaillerie.db");
+    state
+        .with_authenticated(|conn, user| {
+            if user.role != "owner" {
+                return Err(db::DbError::InvalidInput(
+                    "only an Owner can restore the database".to_string(),
+                ));
+            }
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            fs::copy(source_path, &destination)?;
+            conn.execute(
+                "INSERT INTO audit_logs
+                 (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+                 VALUES (?1, ?2, ?3, 'database_restore_completed', 'database', ?1, ?4, ?5)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    user.business_id,
+                    user.id,
+                    source,
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1129,6 +1321,7 @@ fn inventory_receive_stock(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let conn = db::open(&data_dir.join("quincaillerie.db"))?;
@@ -1138,7 +1331,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             auth_business_status,
             auth_bootstrap_owner,
+            auth_recovery_questions,
+            auth_recovery_prompts,
+            auth_recover_owner,
             auth_login,
+            database_backup,
+            database_restore,
             employee_list,
             employee_create,
             employee_set_active,

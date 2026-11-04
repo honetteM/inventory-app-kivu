@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { save, open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState, type FormEvent } from "react";
 import { Building2, LoaderCircle } from "lucide-react";
 
@@ -81,6 +82,42 @@ export function BusinessSetupPage() {
     } finally {
       setIsSaving(false);
     }
+
+  }
+
+  async function handleBackup() {
+    setError(null);
+    setNotice(null);
+    const destination = await save({
+      title: "Save KIVU SUBLIME database backup",
+      defaultPath: "kivu-sublime-backup.db",
+      filters: [{ name: "SQLite database", extensions: ["db"] }],
+    });
+    if (!destination) return;
+    try {
+      await invoke("database_backup", { destination });
+      setNotice("Database backup created successfully.");
+    } catch (cause) {
+      setError(`Could not create the database backup. ${errorMessage(cause)}`);
+    }
+  }
+
+  async function handleRestore() {
+    setError(null);
+    setNotice(null);
+    const source = await open({
+      title: "Select a KIVU SUBLIME database backup",
+      multiple: false,
+      directory: false,
+      filters: [{ name: "SQLite database", extensions: ["db"] }],
+    });
+    if (!source || Array.isArray(source)) return;
+    if (!window.confirm("Restore this backup? Current data will be replaced and the application will close.")) return;
+    try {
+      await invoke("database_restore", { source });
+    } catch (cause) {
+      setError(`Could not restore the database. ${errorMessage(cause)}`);
+    }
   }
 
   return (
@@ -148,6 +185,25 @@ export function BusinessSetupPage() {
                 </Button>
               </div>
             </form>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {user.role === "owner" ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Database safety</CardTitle>
+            <CardDescription>
+              Create a verified SQLite backup before upgrades. Restoring replaces the current data and closes the application.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-3">
+            <Button type="button" variant="outline" onClick={handleBackup}>
+              Create database backup
+            </Button>
+            <Button type="button" variant="destructive" onClick={handleRestore}>
+              Restore database backup
+            </Button>
           </CardContent>
         </Card>
       ) : null}

@@ -432,12 +432,116 @@ body {
   padding: 2rem;
 }
 
+.cashbook-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 2rem;
+  padding-bottom: 1.25rem;
+  border-bottom: 3px solid #1e3a5f;
+}
+
+.cashbook-header h1 {
+  margin: 0.25rem 0;
+  font-size: 2rem;
+  letter-spacing: -0.035em;
+}
+
+.cashbook-header p {
+  margin: 0;
+  color: #586579;
+  font-size: 0.82rem;
+}
+
+.cashbook-ledger {
+  margin-top: 1.5rem;
+}
+
+.cashbook-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.cashbook-table th {
+  padding: 0.6rem 0.7rem;
+  background: #1e3a5f;
+  color: white;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.cashbook-table th:nth-child(2),
+.cashbook-table td:nth-child(2) {
+  text-align: right;
+}
+
+.cashbook-table th:last-child,
+.cashbook-table td:last-child {
+  text-align: right;
+}
+
+.cashbook-table td {
+  padding: 0.48rem 0.7rem;
+  border-bottom: 1px solid #e1e6ed;
+  vertical-align: top;
+}
+
+.cashbook-table td:first-child {
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+.cashbook-table td:nth-child(2) {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.cashbook-table td:last-child {
+  color: #586579;
+  font-size: 0.72rem;
+}
+
+.cashbook-table tr.is-emphasis td {
+  background: #f1f4f8;
+  font-weight: 750;
+}
+
+.cashbook-table tr.is-section td {
+  padding-top: 0.9rem;
+  border-bottom-color: #9daabd;
+  color: #1e3a5f;
+}
+
+.cashbook-status {
+  margin-top: 1.25rem;
+  padding: 0.9rem 1rem;
+  border-left: 4px solid #16835b;
+  background: #f1f8f5;
+  color: #244238;
+  font-size: 0.75rem;
+}
+
+.cashbook-status.is-unbalanced {
+  border-left-color: #bd3b3b;
+  background: #fff5f5;
+  color: #642b2b;
+}
+
+.cashbook-status p {
+  margin: 0.3rem 0 0;
+  line-height: 1.5;
+}
+
 @media (max-width: 700px) {
   .print-report-document {
     padding: 1.5rem;
   }
 
   .print-report-header,
+  .cashbook-header,
   .print-report-columns {
     grid-template-columns: 1fr;
     flex-direction: column;
