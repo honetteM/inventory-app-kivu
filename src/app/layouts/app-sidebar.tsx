@@ -21,7 +21,7 @@ export function AppSidebar() {
   const navGroups = getAvailableNavGroups(permissions);
 
   return (
-    <Sidebar collapsible="icon">
+    <Sidebar className="print:hidden" collapsible="icon">
       <SidebarHeader className="border-b border-sidebar-border px-3 py-4">
         <div className="flex items-center gap-3 px-1 py-1.5">
           <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-sidebar-primary text-sm font-bold text-sidebar-primary-foreground shadow-sm">

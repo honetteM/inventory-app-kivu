@@ -3495,6 +3495,8 @@ pub struct DailyBusinessReport {
     pub loan_taken: i64,
     pub loan_paid: i64,
     pub cash_loan_paid: i64,
+    pub cash_loan_received: i64,
+    pub cash_customer_repayment: i64,
     pub bank_loan_paid: i64,
     pub momo_loan_paid: i64,
     pub bank: i64,
@@ -3615,9 +3617,8 @@ pub fn daily_business_report(
         params![business_id, report_date],
         |row| row.get(0),
     )?;
-    let other_verified_cash_outflows = cash_movement_sum(
-        "m.direction = 'out' AND m.movement_type NOT IN ('expense_payment', 'transfer_out')",
-    )?;
+    let other_verified_cash_outflows =
+        cash_movement_sum("m.direction = 'out' AND m.movement_type = 'other_payment'")?;
     let mut outflow_stmt = conn.prepare(
         "SELECT
             CASE m.movement_type
@@ -3645,7 +3646,7 @@ pub fn daily_business_report(
          WHERE m.business_id = ?1 AND a.account_type = 'cash_drawer'
            AND date(m.occurred_at, 'localtime') = ?2
            AND m.direction = 'out'
-           AND m.movement_type NOT IN ('expense_payment', 'transfer_out')
+           AND m.movement_type = 'other_payment'
          ORDER BY m.occurred_at, m.id",
     )?;
     let other_cash_outflows = outflow_stmt
@@ -3805,10 +3806,13 @@ pub fn daily_business_report(
             |row| row.get(0),
         )?)
     };
-    let cash_loan_paid = account_movement_sum("customer_repayment", "'cash_drawer'")?;
-    let bank_loan_paid = account_movement_sum("customer_repayment", "'bank'")?;
+    let cash_customer_repayment =
+        account_movement_sum("customer_repayment", "'cash_drawer'")?;
+    let cash_loan_received = account_movement_sum("loan_issued", "'cash_drawer'")?;
+    let cash_loan_paid = account_movement_sum("loan_repayment", "'cash_drawer'")?;
+    let bank_loan_paid = account_movement_sum("loan_repayment", "'bank'")?;
     let momo_loan_paid =
-        account_movement_sum("customer_repayment", "'mtn_wallet', 'airtel_wallet'")?;
+        account_movement_sum("loan_repayment", "'mtn_wallet', 'airtel_wallet'")?;
     let cash_supplier_payments = account_movement_sum("supplier_payment", "'cash_drawer'")?;
     let bank_supplier_payments = account_movement_sum("supplier_payment", "'bank'")?;
     let momo_supplier_payments =
@@ -3876,8 +3880,8 @@ pub fn daily_business_report(
         params![business_id, report_date],
         |row| row.get(0),
     )?;
-    let loan_taken = credit_sales;
-    let loan_paid = customer_repayments;
+    let loan_taken = loan_received;
+    let loan_paid = loan_repayments;
     let ending_cash = opening_physical_cash
         .checked_add(net_position)
         .ok_or_else(|| {
@@ -3905,10 +3909,12 @@ pub fn daily_business_report(
     let cash_other_receipts = account_movement_sum("other_receipt", "'cash_drawer'")?;
     let calculated_physical_cash = opening_physical_cash
         .checked_add(cash_sales)
-        .and_then(|value| value.checked_add(cash_loan_paid))
+        .and_then(|value| value.checked_add(cash_customer_repayment))
+        .and_then(|value| value.checked_add(cash_loan_received))
         .and_then(|value| value.checked_add(cash_other_receipts))
         .and_then(|value| value.checked_sub(cash_expenses))
         .and_then(|value| value.checked_sub(cash_supplier_payments))
+        .and_then(|value| value.checked_sub(cash_loan_paid))
         .and_then(|value| value.checked_sub(cash_transferred_to_bank))
         .and_then(|value| value.checked_sub(cash_transferred_to_mobile_money))
         .and_then(|value| value.checked_sub(other_verified_cash_outflows))
@@ -3972,6 +3978,8 @@ pub fn daily_business_report(
         loan_taken,
         loan_paid,
         cash_loan_paid,
+        cash_loan_received,
+        cash_customer_repayment,
         bank_loan_paid,
         momo_loan_paid,
         bank,
@@ -9860,8 +9868,8 @@ mod tests {
         assert_eq!(report.total_inflow, 15_000);
         assert_eq!(report.total_outflow, 500);
         assert_eq!(report.net_position, 14_500);
-        assert_eq!(report.loan_taken, 10_000);
-        assert_eq!(report.loan_paid, 6_000);
+        assert_eq!(report.loan_taken, 0);
+        assert_eq!(report.loan_paid, 0);
         assert_eq!(report.bank, 0);
         assert_eq!(report.momo, 6_000);
         assert_eq!(report.opening_customer_outstanding, 0);

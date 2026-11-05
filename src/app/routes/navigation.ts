@@ -51,6 +51,7 @@ export const navGroups: NavGroup[] = [
       { title: "Payments", url: "/payments", icon: HandCoins, permission: "customer_debts.read" },
       { title: "Cash accounts", url: "/cash-accounts", icon: Landmark, permission: "cash_accounts.manage" },
       { title: "Reports", url: "/reports", icon: BarChart3, permission: "reports.read" },
+      { title: "Income statement", url: "/reports/income", icon: BarChart3, permission: "reports.read" },
       { title: "Employees", url: "/employees", icon: UserCog, permission: "employees.manage" },
     ],
   },

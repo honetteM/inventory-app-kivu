@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { Download, LoaderCircle, Printer, WalletCards } from "lucide-react";
+import { LoaderCircle, Printer, WalletCards } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -177,8 +177,8 @@ export function ReportsPage() {
     <div className="daily-report space-y-6">
       <PageHeader
         eyebrow="Finance & reporting"
-        title="Daily calculation report"
-        description="Select one business day. The application calculates the totals and cash reconciliation for that date."
+        title="Financial reconciliation report"
+        description="Cash, Bank, MOMO, credit, supplier payments, transfers, and physical cash reconciliation."
         actions={
           <div className="flex flex-wrap gap-2">
             <SelectField value={businessId} onChange={(event) => setBusinessId(event.target.value)} aria-label="Business">
@@ -199,8 +199,7 @@ export function ReportsPage() {
               <p className="text-sm text-muted-foreground">{dateLabel}</p>
             </div>
             <div className="flex gap-2 print:hidden">
-              <Button variant="outline" onClick={() => navigate(`/reports/daily/print?businessId=${encodeURIComponent(businessId)}&date=${encodeURIComponent(reportDate)}`)}><Printer />Printable view</Button>
-              <Button onClick={() => navigate(`/reports/daily/print?businessId=${encodeURIComponent(businessId)}&date=${encodeURIComponent(reportDate)}`)}><Download />Export PDF</Button>
+              <Button variant="outline" onClick={() => navigate(`/reports/daily/print?businessId=${encodeURIComponent(businessId)}&date=${encodeURIComponent(reportDate)}`)}><Printer />Print view</Button>
             </div>
           </header>
 
@@ -250,7 +249,7 @@ export function ReportsPage() {
           <section className="grid gap-6 xl:grid-cols-3">
             <SummaryCard title="Sales value" value={formatMoney(report.sales_total)} detail={`${report.sale_count} completed sales; this is not all cash received`} />
             <SummaryCard title="Supplier payments" value={formatMoney(report.supplier_payments)} detail="Separate from operating expenses" />
-            <SummaryCard title="Loan taken" value={formatMoney(report.loan_taken)} detail="Customer amount still unpaid" />
+            <SummaryCard title="Credit sales" value={formatMoney(report.credit_sales)} detail="Customer debt created by completed sales" />
             <SummaryCard title="Customer debt at close" value={formatMoney(report.closing_customer_outstanding)} detail="Outstanding customer balance" />
           </section>
 

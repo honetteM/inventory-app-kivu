@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, Download, LoaderCircle, Printer } from "lucide-react";
+import { ArrowLeft, LoaderCircle, Printer } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -29,6 +29,8 @@ interface DailyBusinessReport {
   loan_taken: number;
   loan_paid: number;
   cash_loan_paid: number;
+  cash_loan_received: number;
+  cash_customer_repayment: number;
   bank_loan_paid: number;
   momo_loan_paid: number;
   cash_supplier_payments: number;
@@ -107,7 +109,7 @@ export function DailyReportPrintPage() {
   }, [businessId, reportDate]);
 
   useEffect(() => {
-    document.title = "KIVU_SUBLIME_DAILY_CASHBOOK_REPORT";
+    document.title = "KIVU_SUBLIME_Daily_Cashbook";
     return () => {
       document.title = "Quincaillerie Manager";
     };
@@ -126,10 +128,11 @@ export function DailyReportPrintPage() {
     { description: "TOTAL OUTFLOW", amount: -report.total_outflow, destination: "Operating expenses", emphasis: true },
     { description: "NET POSITION", amount: report.net_position, destination: "Inflow − outflow", emphasis: true },
     { description: "ENDING CASH", amount: report.ending_cash, destination: "Starting balance + net position", emphasis: true },
-    { description: "LOAN TAKEN", amount: -report.loan_taken, destination: `After loan: ${formatMoney(report.ending_cash - report.loan_taken)}` },
+    { description: "LOAN RECEIVED — CASH", amount: report.cash_loan_received, destination: "Physical cash" },
     { description: "LOAN PAID — CASH", amount: report.cash_loan_paid, destination: "Physical cash" },
     { description: "LOAN PAID — BANK", amount: report.bank_loan_paid, destination: "Bank" },
     { description: "LOAN PAID — MOMO", amount: report.momo_loan_paid, destination: "MOMO" },
+    { description: "CUSTOMER REPAYMENTS — CASH", amount: report.cash_customer_repayment, destination: "Physical cash" },
     { description: "VERSEMENT", amount: 0, destination: "Confirmed transfers from physical cash", section: true },
     { description: "BANK", amount: -report.cash_transferred_to_bank, destination: "Cash → BANK" },
     { description: "MOMO", amount: -report.cash_transferred_to_mobile_money, destination: "Cash → MOMO" },
@@ -151,7 +154,6 @@ export function DailyReportPrintPage() {
       <div className="print-report-actions">
         <Button variant="outline" asChild><Link to="/reports"><ArrowLeft />Back to Reports</Link></Button>
         <Button variant="outline" onClick={() => window.print()}><Printer />Print</Button>
-        <Button onClick={() => window.print()}><Download />Download PDF</Button>
       </div>
       <article className="print-report-document">
         <header className="cashbook-header">
@@ -177,7 +179,6 @@ export function DailyReportPrintPage() {
           <p>Bank and MOMO customer receipts, repayments, expenses, supplier payments, and balances remain account-specific and are not deducted from physical cash unless paid from the cash drawer.</p>
         </section>
         <footer className="print-report-footer">
-          <span>Generated from verified application records</span>
           <span>KIVU SUBLIME · {report.report_date}</span>
         </footer>
       </article>
