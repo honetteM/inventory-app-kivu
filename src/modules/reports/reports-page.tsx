@@ -141,7 +141,8 @@ export function ReportsPage() {
   const navigate = useNavigate();
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessId, setBusinessId] = useState("");
-  const [reportDate, setReportDate] = useState(localDate);
+  const [fromDate, setFromDate] = useState(localDate);
+  const [toDate, setToDate] = useState(localDate);
   const [report, setReport] = useState<DailyBusinessReport | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -157,20 +158,20 @@ export function ReportsPage() {
   }, []);
 
   useEffect(() => {
-    if (!businessId || !reportDate) return;
+    if (!businessId || !fromDate || !toDate || fromDate > toDate) return;
     setIsLoading(true);
     setError(null);
-    invoke<DailyBusinessReport>("daily_business_report", { businessId, reportDate })
+    invoke<DailyBusinessReport>("daily_business_report_range", { businessId, fromDate, toDate })
       .then(setReport)
       .catch((cause) => {
         setReport(null);
         setError(`Could not calculate the daily report. ${errorText(cause)}`);
       })
       .finally(() => setIsLoading(false));
-  }, [businessId, reportDate]);
+  }, [businessId, fromDate, toDate]);
 
-  const dateLabel = reportDate
-    ? new Date(`${reportDate}T00:00:00`).toLocaleDateString("en-RW", { day: "numeric", month: "long", year: "numeric" })
+  const dateLabel = fromDate && toDate && fromDate <= toDate
+    ? `${new Date(`${fromDate}T00:00:00`).toLocaleDateString("en-RW", { day: "numeric", month: "long", year: "numeric" })} — ${new Date(`${toDate}T00:00:00`).toLocaleDateString("en-RW", { day: "numeric", month: "long", year: "numeric" })}`
     : "Select a date";
 
   return (
@@ -184,12 +185,14 @@ export function ReportsPage() {
             <SelectField value={businessId} onChange={(event) => setBusinessId(event.target.value)} aria-label="Business">
               {businesses.map((business) => <option key={business.id} value={business.id}>{business.name}</option>)}
             </SelectField>
-            <Input type="date" value={reportDate} max={localDate()} onChange={(event) => setReportDate(event.target.value)} aria-label="Report date" />
+            <Input type="date" value={fromDate} max={toDate || localDate()} onChange={(event) => setFromDate(event.target.value)} aria-label="From date" />
+            <Input type="date" value={toDate} min={fromDate} max={localDate()} onChange={(event) => setToDate(event.target.value)} aria-label="To date" />
           </div>
         }
       />
       {error ? <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{error}</div> : null}
-      {isLoading ? <Card><CardContent className="flex items-center gap-2 py-10 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Calculating this day...</CardContent></Card> : null}
+      {fromDate > toDate ? <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">From date must be before or equal to to date.</div> : null}
+      {isLoading ? <Card><CardContent className="flex items-center gap-2 py-10 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Calculating report range...</CardContent></Card> : null}
       {report ? (
         <article className="report-paper space-y-6">
           <header className="flex flex-wrap items-start justify-between gap-4 border-b-2 border-primary pb-5">
@@ -199,7 +202,7 @@ export function ReportsPage() {
               <p className="text-sm text-muted-foreground">{dateLabel}</p>
             </div>
             <div className="flex gap-2 print:hidden">
-              <Button variant="outline" onClick={() => navigate(`/reports/daily/print?businessId=${encodeURIComponent(businessId)}&date=${encodeURIComponent(reportDate)}`)}><Printer />Print view</Button>
+              <Button variant="outline" disabled={!fromDate || !toDate || fromDate > toDate} onClick={() => navigate(`/reports/daily/print?businessId=${encodeURIComponent(businessId)}&fromDate=${encodeURIComponent(fromDate)}&toDate=${encodeURIComponent(toDate)}`)}><Printer />Print view</Button>
             </div>
           </header>
 

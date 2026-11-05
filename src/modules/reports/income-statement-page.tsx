@@ -35,7 +35,8 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 export function IncomeStatementPage() {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessId, setBusinessId] = useState("");
-  const [date, setDate] = useState(today);
+  const [fromDate, setFromDate] = useState(today);
+  const [toDate, setToDate] = useState(today);
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,12 +48,12 @@ export function IncomeStatementPage() {
   }, []);
 
   useEffect(() => {
-    if (!businessId || !date) return;
+    if (!businessId || !fromDate || !toDate || fromDate > toDate) return;
     setReport(null);
-    invoke<Report>("daily_business_report", { businessId, reportDate: date })
+    invoke<Report>("daily_business_report_range", { businessId, fromDate, toDate })
       .then(setReport)
       .catch((cause) => setError(`Could not calculate the income statement. ${errorText(cause)}`));
-  }, [businessId, date]);
+  }, [businessId, fromDate, toDate]);
 
   return (
     <div className="daily-report space-y-6">
@@ -62,17 +63,19 @@ export function IncomeStatementPage() {
           <SelectField value={businessId} onChange={(event) => setBusinessId(event.target.value)} aria-label="Business">
             {businesses.map((business) => <option key={business.id} value={business.id}>{business.name}</option>)}
           </SelectField>
-          <Input type="date" value={date} max={today()} onChange={(event) => setDate(event.target.value)} aria-label="Report date" />
+          <Input type="date" value={fromDate} max={toDate || today()} onChange={(event) => setFromDate(event.target.value)} aria-label="From date" />
+          <Input type="date" value={toDate} min={fromDate} max={today()} onChange={(event) => setToDate(event.target.value)} aria-label="To date" />
           <Button variant="outline" onClick={() => window.print()}><Printer />Print</Button>
         </div>}
       />
       {error ? <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{error}</div> : null}
+      {fromDate > toDate ? <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">From date must be before or equal to to date.</div> : null}
       {!report ? <Card><CardContent className="flex items-center gap-2 py-10 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Calculating income statement...</CardContent></Card> : (
         <article className="report-paper space-y-6">
           <header className="border-b-2 border-primary pb-5">
             <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">Business income statement</p>
             <h2 className="font-heading text-2xl font-semibold">{report.business_name}</h2>
-            <p className="text-sm text-muted-foreground">{date}</p>
+            <p className="text-sm text-muted-foreground">{fromDate} — {toDate}</p>
           </header>
           <Card>
             <CardHeader><CardTitle>Income statement</CardTitle><CardDescription>Only completed product sales and operating expenses are included. Loans, transfers, repayments, and supplier payments are excluded.</CardDescription></CardHeader>

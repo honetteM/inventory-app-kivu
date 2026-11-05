@@ -61,6 +61,7 @@ function formatMoney(value: number): string {
 }
 
 function dateLabel(value: string): string {
+  if (value.includes(" to ")) return value;
   return new Date(`${value}T00:00:00`).toLocaleDateString("en-RW", {
     day: "numeric",
     month: "long",
@@ -95,18 +96,20 @@ export function DailyReportPrintPage() {
   const [searchParams] = useSearchParams();
   const businessId = searchParams.get("businessId") ?? "";
   const reportDate = searchParams.get("date") ?? "";
+  const fromDate = searchParams.get("fromDate") ?? reportDate;
+  const toDate = searchParams.get("toDate") ?? reportDate;
   const [report, setReport] = useState<DailyBusinessReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!businessId || !reportDate) {
+    if (!businessId || !fromDate || !toDate) {
       setError("A business and report date are required.");
       return;
     }
-    invoke<DailyBusinessReport>("daily_business_report", { businessId, reportDate })
+    invoke<DailyBusinessReport>("daily_business_report_range", { businessId, fromDate, toDate })
       .then(setReport)
       .catch((cause) => setError(`Could not calculate the report. ${errorText(cause)}`));
-  }, [businessId, reportDate]);
+  }, [businessId, fromDate, toDate]);
 
   useEffect(() => {
     document.title = "KIVU_SUBLIME_Daily_Cashbook";

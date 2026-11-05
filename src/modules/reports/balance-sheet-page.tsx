@@ -50,7 +50,9 @@ const accountLabel = (value: string) =>
 export function BalanceSheetPage() {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessId, setBusinessId] = useState("");
-  const [date, setDate] = useState(today);
+  const [fromDate, setFromDate] = useState(today);
+  const [toDate, setToDate] = useState(today);
+  const [openingReport, setOpeningReport] = useState<BalanceSheetReport | null>(null);
   const [report, setReport] = useState<BalanceSheetReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -62,13 +64,20 @@ export function BalanceSheetPage() {
   }, []);
 
   useEffect(() => {
-    if (!businessId || !date) return;
+    if (!businessId || !fromDate || !toDate || fromDate > toDate) return;
     setReport(null);
+    setOpeningReport(null);
     setError(null);
-    invoke<BalanceSheetReport>("balance_sheet_report", { businessId, reportDate: date })
-      .then(setReport)
+    Promise.all([
+      invoke<BalanceSheetReport>("balance_sheet_report", { businessId, reportDate: fromDate }),
+      invoke<BalanceSheetReport>("balance_sheet_report", { businessId, reportDate: toDate }),
+    ])
+      .then(([opening, closing]) => {
+        setOpeningReport(opening);
+        setReport(closing);
+      })
       .catch((cause) => setError(`Could not calculate the balance sheet. ${errorText(cause)}`));
-  }, [businessId, date]);
+  }, [businessId, fromDate, toDate]);
 
   return (
     <div className="daily-report space-y-6">
@@ -80,18 +89,33 @@ export function BalanceSheetPage() {
           <SelectField value={businessId} onChange={(event) => setBusinessId(event.target.value)} aria-label="Business">
             {businesses.map((business) => <option key={business.id} value={business.id}>{business.name}</option>)}
           </SelectField>
-          <Input type="date" value={date} max={today()} onChange={(event) => setDate(event.target.value)} aria-label="Report date" />
+          <Input type="date" value={fromDate} max={toDate || today()} onChange={(event) => setFromDate(event.target.value)} aria-label="From date" />
+          <Input type="date" value={toDate} min={fromDate} max={today()} onChange={(event) => setToDate(event.target.value)} aria-label="To date" />
           <Button variant="outline" onClick={() => window.print()}><Printer />Print</Button>
         </div>}
       />
       {error ? <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{error}</div> : null}
+      {fromDate > toDate ? <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">From date must be before or equal to to date.</div> : null}
       {!report ? <Card><CardContent className="flex items-center gap-2 py-10 text-sm text-muted-foreground"><LoaderCircle className="size-4 animate-spin" />Calculating balance sheet...</CardContent></Card> : (
         <article className="report-paper space-y-6">
           <header className="border-b-2 border-primary pb-5">
             <p className="text-sm font-medium uppercase tracking-wide text-muted-foreground">Balance sheet</p>
             <h2 className="font-heading text-2xl font-semibold">{report.business_name}</h2>
-            <p className="text-sm text-muted-foreground">As of {report.report_date}</p>
+            <p className="text-sm text-muted-foreground">Period: {fromDate} — {toDate}</p>
           </header>
+
+          {openingReport ? (
+            <Card>
+              <CardHeader><CardTitle>Opening and closing position</CardTitle><CardDescription>Comparing the financial position at each selected date.</CardDescription></CardHeader>
+              <CardContent>
+                <table className="w-full text-sm"><tbody>
+                  <tr className="border-b"><td className="py-2">Opening total assets ({openingReport.report_date})</td><td className="data-number py-2 text-right">{money(openingReport.total_assets)}</td></tr>
+                  <tr className="border-b"><td className="py-2">Closing total assets ({report.report_date})</td><td className="data-number py-2 text-right">{money(report.total_assets)}</td></tr>
+                  <tr className="bg-primary/10 font-bold"><td className="py-3">Net asset movement</td><td className="data-number py-3 text-right">{money(report.total_assets - openingReport.total_assets)}</td></tr>
+                </tbody></table>
+              </CardContent>
+            </Card>
+          ) : null}
 
           <div className="grid gap-6 xl:grid-cols-2">
             <Card>

@@ -1,5 +1,5 @@
 use rusqlite::{Connection, OptionalExtension, params};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -4015,6 +4015,282 @@ pub fn daily_business_report(
         momo,
         opening_customer_outstanding,
         closing_customer_outstanding: customer_outstanding,
+        calculated_physical_cash,
+        cash_reconciliation_difference,
+        loan_received,
+        loan_repayments,
+        other_receipts,
+        sale_count,
+        sales_total,
+        sales_by_payment_method,
+        credit_sales,
+        customer_repayments,
+        expenses_total,
+        expenses_by_category,
+        supplier_payments,
+        cash_supplier_payments,
+        bank_supplier_payments,
+        momo_supplier_payments,
+        purchases_received,
+        cost_of_goods_sold,
+        gross_profit,
+        operating_result,
+        sale_line_count,
+        customer_outstanding,
+        supplier_outstanding,
+        stock_adjustment_counts,
+    })
+}
+
+pub fn daily_business_report_range(
+    conn: &Connection,
+    business_id: &str,
+    from_date: &str,
+    to_date: &str,
+) -> Result<DailyBusinessReport, DbError> {
+    validate_expense_date(from_date)?;
+    validate_expense_date(to_date)?;
+    let from = chrono::NaiveDate::parse_from_str(from_date, "%Y-%m-%d")
+        .map_err(|_| DbError::InvalidInput("enter a valid from date".to_string()))?;
+    let to = chrono::NaiveDate::parse_from_str(to_date, "%Y-%m-%d")
+        .map_err(|_| DbError::InvalidInput("enter a valid to date".to_string()))?;
+    if from > to {
+        return Err(DbError::InvalidInput(
+            "from date must be before or equal to to date".to_string(),
+        ));
+    }
+
+    let mut report = daily_business_report(conn, business_id, from_date)?;
+    let mut opening_physical_cash = report.opening_physical_cash;
+    let mut opening_customer_outstanding = report.opening_customer_outstanding;
+    let mut closing_physical_cash = 0_i64;
+    let mut closing_customer_outstanding = 0_i64;
+    let mut bank = 0_i64;
+    let mut momo = 0_i64;
+
+    let mut money_received = 0_i64;
+    let mut cash_received = 0_i64;
+    let mut cash_expenses = 0_i64;
+    let mut cash_transferred_to_bank = 0_i64;
+    let mut cash_transferred_to_mobile_money = 0_i64;
+    let mut other_verified_cash_outflows = 0_i64;
+    let mut total_inflow = 0_i64;
+    let mut total_outflow = 0_i64;
+    let mut loan_taken = 0_i64;
+    let mut loan_paid = 0_i64;
+    let mut cash_loan_paid = 0_i64;
+    let mut cash_loan_received = 0_i64;
+    let mut cash_customer_repayment = 0_i64;
+    let mut bank_loan_paid = 0_i64;
+    let mut momo_loan_paid = 0_i64;
+    let mut loan_received = 0_i64;
+    let mut loan_repayments = 0_i64;
+    let mut other_receipts = 0_i64;
+    let mut sale_count = 0_i64;
+    let mut sales_total = 0_i64;
+    let mut credit_sales = 0_i64;
+    let mut customer_repayments = 0_i64;
+    let mut expenses_total = 0_i64;
+    let mut supplier_payments = 0_i64;
+    let mut cash_supplier_payments = 0_i64;
+    let mut bank_supplier_payments = 0_i64;
+    let mut momo_supplier_payments = 0_i64;
+    let mut purchases_received = 0_i64;
+    let mut cost_of_goods_sold = 0_i64;
+    let mut gross_profit = 0_i64;
+    let mut operating_result = 0_i64;
+    let mut sale_line_count = 0_i64;
+    let mut customer_outstanding = 0_i64;
+    let mut supplier_outstanding = 0_i64;
+
+    let mut sales_by_payment_method: HashMap<String, i64> = HashMap::new();
+    let mut expenses_by_category: HashMap<String, i64> = HashMap::new();
+    let mut stock_adjustment_counts: HashMap<String, i64> = HashMap::new();
+    let mut other_cash_outflows: HashMap<(String, String), i64> = HashMap::new();
+
+    let mut date = from;
+    while date <= to {
+        report = daily_business_report(conn, business_id, &date.format("%Y-%m-%d").to_string())?;
+        if date == from {
+            opening_physical_cash = report.opening_physical_cash;
+            opening_customer_outstanding = report.opening_customer_outstanding;
+        }
+        closing_physical_cash = report.physical_closing_cash;
+        closing_customer_outstanding = report.closing_customer_outstanding;
+        customer_outstanding = report.customer_outstanding;
+        supplier_outstanding = report.supplier_outstanding;
+
+        macro_rules! add {
+            ($target:ident, $value:expr) => {
+                $target = $target.checked_add($value).ok_or_else(|| {
+                    DbError::InvalidInput("report total exceeds the supported range".to_string())
+                })?;
+            };
+        }
+
+        add!(money_received, report.money_received);
+        add!(cash_received, report.cash_received);
+        add!(cash_expenses, report.cash_expenses);
+        add!(cash_transferred_to_bank, report.cash_transferred_to_bank);
+        add!(
+            cash_transferred_to_mobile_money,
+            report.cash_transferred_to_mobile_money
+        );
+        add!(
+            other_verified_cash_outflows,
+            report.other_verified_cash_outflows
+        );
+        add!(total_inflow, report.total_inflow);
+        add!(total_outflow, report.total_outflow);
+        add!(loan_taken, report.loan_taken);
+        add!(loan_paid, report.loan_paid);
+        add!(cash_loan_paid, report.cash_loan_paid);
+        add!(cash_loan_received, report.cash_loan_received);
+        add!(cash_customer_repayment, report.cash_customer_repayment);
+        add!(bank_loan_paid, report.bank_loan_paid);
+        add!(momo_loan_paid, report.momo_loan_paid);
+        add!(bank, report.bank);
+        add!(momo, report.momo);
+        add!(loan_received, report.loan_received);
+        add!(loan_repayments, report.loan_repayments);
+        add!(other_receipts, report.other_receipts);
+        add!(sale_count, report.sale_count);
+        add!(sales_total, report.sales_total);
+        add!(credit_sales, report.credit_sales);
+        add!(customer_repayments, report.customer_repayments);
+        add!(expenses_total, report.expenses_total);
+        add!(supplier_payments, report.supplier_payments);
+        add!(cash_supplier_payments, report.cash_supplier_payments);
+        add!(bank_supplier_payments, report.bank_supplier_payments);
+        add!(momo_supplier_payments, report.momo_supplier_payments);
+        add!(purchases_received, report.purchases_received);
+        add!(cost_of_goods_sold, report.cost_of_goods_sold);
+        add!(gross_profit, report.gross_profit);
+        add!(operating_result, report.operating_result);
+        add!(sale_line_count, report.sale_line_count);
+
+        for item in report.sales_by_payment_method {
+            let entry = sales_by_payment_method.entry(item.category).or_insert(0);
+            *entry = entry.checked_add(item.amount).ok_or_else(|| {
+                DbError::InvalidInput("sales breakdown exceeds the supported range".to_string())
+            })?;
+        }
+        for item in report.expenses_by_category {
+            let entry = expenses_by_category.entry(item.category).or_insert(0);
+            *entry = entry.checked_add(item.amount).ok_or_else(|| {
+                DbError::InvalidInput("expense breakdown exceeds the supported range".to_string())
+            })?;
+        }
+        for item in report.stock_adjustment_counts {
+            let entry = stock_adjustment_counts
+                .entry(item.movement_type)
+                .or_insert(0);
+            *entry = entry.checked_add(item.count).ok_or_else(|| {
+                DbError::InvalidInput(
+                    "stock adjustment count exceeds the supported range".to_string(),
+                )
+            })?;
+        }
+        for item in report.other_cash_outflows {
+            let entry = other_cash_outflows
+                .entry((item.category, item.description))
+                .or_insert(0);
+            *entry = entry.checked_add(item.amount).ok_or_else(|| {
+                DbError::InvalidInput(
+                    "cash outflow breakdown exceeds the supported range".to_string(),
+                )
+            })?;
+        }
+        date = date.succ_opt().ok_or_else(|| {
+            DbError::InvalidInput("date range exceeds the supported calendar".to_string())
+        })?;
+    }
+
+    let net_position = total_inflow.checked_sub(total_outflow).ok_or_else(|| {
+        DbError::InvalidInput("net position exceeds the supported range".to_string())
+    })?;
+    let ending_cash = opening_physical_cash
+        .checked_add(net_position)
+        .ok_or_else(|| {
+            DbError::InvalidInput("ending cash exceeds the supported range".to_string())
+        })?;
+    let calculated_physical_cash = opening_physical_cash
+        .checked_add(cash_received)
+        .and_then(|value| value.checked_sub(cash_expenses))
+        .and_then(|value| value.checked_sub(cash_supplier_payments))
+        .and_then(|value| value.checked_sub(other_verified_cash_outflows))
+        .and_then(|value| value.checked_sub(cash_transferred_to_bank))
+        .and_then(|value| value.checked_sub(cash_transferred_to_mobile_money))
+        .and_then(|value| value.checked_sub(cash_loan_paid))
+        .ok_or_else(|| {
+            DbError::InvalidInput("calculated cash exceeds the supported range".to_string())
+        })?;
+    let cash_reconciliation_difference = calculated_physical_cash
+        .checked_sub(closing_physical_cash)
+        .ok_or_else(|| {
+            DbError::InvalidInput(
+                "cash reconciliation difference exceeds the supported range".to_string(),
+            )
+        })?;
+
+    let mut sales_by_payment_method: Vec<_> = sales_by_payment_method
+        .into_iter()
+        .map(|(category, amount)| DailyAmountBreakdown { category, amount })
+        .collect();
+    sales_by_payment_method.sort_by(|a, b| a.category.cmp(&b.category));
+    let mut expenses_by_category: Vec<_> = expenses_by_category
+        .into_iter()
+        .map(|(category, amount)| DailyAmountBreakdown { category, amount })
+        .collect();
+    expenses_by_category.sort_by(|a, b| a.category.cmp(&b.category));
+    let mut stock_adjustment_counts: Vec<_> = stock_adjustment_counts
+        .into_iter()
+        .map(|(movement_type, count)| DailyCountBreakdown {
+            movement_type,
+            count,
+        })
+        .collect();
+    stock_adjustment_counts.sort_by(|a, b| a.movement_type.cmp(&b.movement_type));
+    let mut other_cash_outflows: Vec<_> = other_cash_outflows
+        .into_iter()
+        .map(
+            |((category, description), amount)| DailyCashOutflowBreakdown {
+                category,
+                description,
+                amount,
+            },
+        )
+        .collect();
+    other_cash_outflows.sort_by(|a, b| a.description.cmp(&b.description));
+
+    let business_name = report.business_name;
+    Ok(DailyBusinessReport {
+        business_name,
+        report_date: format!("{from_date} to {to_date}"),
+        money_received,
+        net_position,
+        opening_physical_cash,
+        cash_received,
+        cash_expenses,
+        cash_transferred_to_bank,
+        cash_transferred_to_mobile_money,
+        other_verified_cash_outflows,
+        other_cash_outflows,
+        physical_closing_cash: closing_physical_cash,
+        total_inflow,
+        total_outflow,
+        ending_cash,
+        loan_taken,
+        loan_paid,
+        cash_loan_paid,
+        cash_loan_received,
+        cash_customer_repayment,
+        bank_loan_paid,
+        momo_loan_paid,
+        bank,
+        momo,
+        opening_customer_outstanding,
+        closing_customer_outstanding,
         calculated_physical_cash,
         cash_reconciliation_difference,
         loan_received,
@@ -10149,6 +10425,30 @@ mod tests {
         assert_eq!(report.customer_outstanding, 4_000);
         assert_eq!(report.supplier_outstanding, 0);
         assert!(report.stock_adjustment_counts.is_empty());
+    }
+
+    #[test]
+    fn daily_business_report_range_matches_single_day_and_rejects_reversed_dates() {
+        let conn = open_in_memory().unwrap();
+        let business = create_business(&conn, "Range shop", None).unwrap();
+        let report_date = "2026-02-10";
+
+        let daily = daily_business_report(&conn, &business.id, report_date).unwrap();
+        let range =
+            daily_business_report_range(&conn, &business.id, report_date, report_date).unwrap();
+
+        assert_eq!(range.business_name, daily.business_name);
+        assert_eq!(range.sales_total, daily.sales_total);
+        assert_eq!(range.expenses_total, daily.expenses_total);
+        assert_eq!(range.total_inflow, daily.total_inflow);
+        assert_eq!(range.total_outflow, daily.total_outflow);
+        assert_eq!(range.physical_closing_cash, daily.physical_closing_cash);
+        assert_eq!(range.opening_physical_cash, daily.opening_physical_cash);
+
+        assert!(matches!(
+            daily_business_report_range(&conn, &business.id, "2026-02-11", "2026-02-10",),
+            Err(DbError::InvalidInput(_))
+        ));
     }
 
     #[test]

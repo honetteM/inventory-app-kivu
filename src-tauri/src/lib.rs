@@ -1066,6 +1066,20 @@ fn daily_business_report(
 }
 
 #[tauri::command]
+fn daily_business_report_range(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    from_date: String,
+    to_date: String,
+) -> Result<db::DailyBusinessReport, String> {
+    state
+        .with_business_permission(&business_id, db::PERMISSION_REPORTS_READ, |conn, _| {
+            db::daily_business_report_range(conn, &business_id, &from_date, &to_date)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn balance_sheet_report(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -1386,6 +1400,7 @@ pub fn run() {
             customer_statement,
             expense_list,
             daily_business_report,
+            daily_business_report_range,
             balance_sheet_report,
             expense_create,
             customer_debt_record_payment,
