@@ -106,6 +106,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "022_owner_recovery",
         include_str!("../migrations/022_owner_recovery.sql"),
     ),
+    (
+        23,
+        "023_multibranch_foundation",
+        include_str!("../migrations/023_multibranch_foundation.sql"),
+    ),
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -577,10 +582,23 @@ pub struct Business {
     pub language: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Branch {
+    pub id: String,
+    pub business_id: String,
+    pub name: String,
+    pub address: Option<String>,
+    pub phone: Option<String>,
+    pub is_active: bool,
+    pub manager_id: Option<String>,
+    pub manager_name: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct AuthUser {
     pub id: String,
     pub business_id: String,
+    pub branch_id: Option<String>,
     pub username: String,
     pub full_name: String,
     pub role: String,
@@ -632,6 +650,7 @@ pub struct CashTransfer {
 pub struct Employee {
     pub id: String,
     pub business_id: String,
+    pub branch_id: Option<String>,
     pub username: String,
     pub full_name: String,
     pub role: String,
@@ -903,6 +922,28 @@ pub fn bootstrap_owner_with_recovery(
         id
     };
 
+    let default_branch_id = tx.query_row(
+        "SELECT id FROM branches WHERE business_id = ?1 AND is_active = 1
+         ORDER BY created_at, id LIMIT 1",
+        params![business_id],
+        |row| row.get::<_, String>(0),
+    ).optional()?.unwrap_or_else(|| {
+        uuid::Uuid::new_v4().to_string()
+    });
+    let has_branch: i64 = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM branches WHERE business_id = ?1)",
+        params![business_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if has_branch == 0 {
+        let timestamp = now_utc();
+        tx.execute(
+            "INSERT INTO branches (id, business_id, name, is_active, created_at, updated_at)
+             VALUES (?1, ?2, 'Main branch', 1, ?3, ?3)",
+            params![default_branch_id, business_id, timestamp],
+        )?;
+    }
+
     let existing_user_count: i64 = tx.query_row(
         "SELECT COUNT(*) FROM users WHERE business_id = ?1",
         params![business_id],
@@ -942,8 +983,8 @@ pub fn bootstrap_owner_with_recovery(
             "INSERT INTO users
                     (id, business_id, username, full_name, password_hash,
                      recovery_code_hash, recovery_question_one, recovery_answer_one_hash,
-                     recovery_question_two, recovery_answer_two_hash, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+                     recovery_question_two, recovery_answer_two_hash, branch_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
             params![
                 user_id,
                 business_id,
@@ -955,20 +996,22 @@ pub fn bootstrap_owner_with_recovery(
                 recovery_answer_one_hash,
                 recovery_question_two,
                 recovery_answer_two_hash,
+                default_branch_id,
                 timestamp
             ],
         )?;
     } else {
         tx.execute(
             "INSERT INTO users
-                    (id, business_id, username, full_name, password_hash, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                    (id, business_id, username, full_name, password_hash, branch_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
             params![
                 user_id,
                 business_id,
                 username,
                 full_name,
                 password_hash,
+                default_branch_id,
                 timestamp
             ],
         )?;
@@ -999,6 +1042,7 @@ pub fn bootstrap_owner_with_recovery(
     Ok(AuthUser {
         id: user_id,
         business_id,
+        branch_id: Some(default_branch_id),
         username,
         full_name,
         role: "owner".to_string(),
@@ -1051,6 +1095,12 @@ pub fn create_business_for_owner(
          VALUES (?1, ?2, ?3, ?4, ?4)",
         params![business_id, name, tax_id, timestamp],
     )?;
+    let branch_id = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO branches (id, business_id, name, is_active, created_at, updated_at)
+         VALUES (?1, ?2, 'Main branch', 1, ?3, ?3)",
+        params![branch_id, business_id, timestamp],
+    )?;
     let role_id = uuid::Uuid::new_v4().to_string();
     tx.execute(
         "INSERT INTO roles (id, business_id, name, display_name, is_system, created_at, updated_at)
@@ -1061,14 +1111,15 @@ pub fn create_business_for_owner(
     let user_id = uuid::Uuid::new_v4().to_string();
     tx.execute(
         "INSERT INTO users
-            (id, business_id, username, full_name, password_hash, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            (id, business_id, username, full_name, password_hash, branch_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
         params![
             user_id,
             business_id,
             username,
             full_name,
             password_hash,
+            branch_id,
             timestamp
         ],
     )?;
@@ -1122,7 +1173,7 @@ pub fn auth_credentials(
     let username = username.trim().to_ascii_lowercase();
     let result = conn
         .query_row(
-            "SELECT u.id, u.business_id, u.username, u.full_name, r.name, u.password_hash
+            "SELECT u.id, u.business_id, u.branch_id, u.username, u.full_name, r.name, u.password_hash
              FROM users u
              JOIN user_roles ur ON ur.user_id = u.id
              JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
@@ -1136,11 +1187,12 @@ pub fn auth_credentials(
                     user: AuthUser {
                         id: row.get(0)?,
                         business_id: row.get(1)?,
-                        username: row.get(2)?,
-                        full_name: row.get(3)?,
-                        role: row.get(4)?,
+                        branch_id: row.get(2)?,
+                        username: row.get(3)?,
+                        full_name: row.get(4)?,
+                        role: row.get(5)?,
                     },
-                    password_hash: row.get(5)?,
+                    password_hash: row.get(6)?,
                 })
             },
         )
@@ -1155,7 +1207,7 @@ pub fn owner_recovery_credentials(
 ) -> Result<Option<OwnerRecoveryCredentials>, DbError> {
     let username = username.trim().to_ascii_lowercase();
     conn.query_row(
-        "SELECT u.id, u.business_id, u.username, u.full_name,
+        "SELECT u.id, u.business_id, u.branch_id, u.username, u.full_name,
                 u.recovery_code_hash, u.recovery_question_one,
                 u.recovery_answer_one_hash, u.recovery_question_two,
                 u.recovery_answer_two_hash
@@ -1171,15 +1223,16 @@ pub fn owner_recovery_credentials(
                 user: AuthUser {
                     id: row.get(0)?,
                     business_id: row.get(1)?,
-                    username: row.get(2)?,
-                    full_name: row.get(3)?,
+                    branch_id: row.get(2)?,
+                    username: row.get(3)?,
+                    full_name: row.get(4)?,
                     role: "owner".to_string(),
                 },
-                recovery_code_hash: row.get(4)?,
-                question_one: row.get(5)?,
-                answer_one_hash: row.get(6)?,
-                question_two: row.get(7)?,
-                answer_two_hash: row.get(8)?,
+                recovery_code_hash: row.get(5)?,
+                question_one: row.get(6)?,
+                answer_one_hash: row.get(7)?,
+                question_two: row.get(8)?,
+                answer_two_hash: row.get(9)?,
             })
         },
     )
@@ -1255,7 +1308,7 @@ pub fn record_successful_login(conn: &Connection, user: &AuthUser) -> Result<(),
 
 pub fn list_employees(conn: &Connection, business_id: &str) -> Result<Vec<Employee>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT u.id, u.business_id, u.username, u.full_name, r.name, u.is_active,
+        "SELECT u.id, u.business_id, u.branch_id, u.username, u.full_name, r.name, u.is_active,
                 u.last_login_at, u.created_at
          FROM users u
          JOIN user_roles ur ON ur.user_id = u.id
@@ -1268,12 +1321,13 @@ pub fn list_employees(conn: &Connection, business_id: &str) -> Result<Vec<Employ
             Ok(Employee {
                 id: row.get(0)?,
                 business_id: row.get(1)?,
-                username: row.get(2)?,
-                full_name: row.get(3)?,
-                role: row.get(4)?,
-                is_active: row.get::<_, i64>(5)? != 0,
-                last_login_at: row.get(6)?,
-                created_at: row.get(7)?,
+                branch_id: row.get(2)?,
+                username: row.get(3)?,
+                full_name: row.get(4)?,
+                role: row.get(5)?,
+                is_active: row.get::<_, i64>(6)? != 0,
+                last_login_at: row.get(7)?,
+                created_at: row.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2135,7 +2189,7 @@ fn test_payment_account(
         .ok_or_else(|| DbError::InvalidInput("select a supported payment method".to_string()))?;
     let actor: Option<AuthUser> = conn
         .query_row(
-            "SELECT u.id, u.business_id, u.username, u.full_name, r.name
+            "SELECT u.id, u.business_id, u.branch_id, u.username, u.full_name, r.name
              FROM users u
              JOIN user_roles ur ON ur.user_id = u.id
              JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
@@ -2147,9 +2201,10 @@ fn test_payment_account(
                 Ok(AuthUser {
                     id: row.get(0)?,
                     business_id: row.get(1)?,
-                    username: row.get(2)?,
-                    full_name: row.get(3)?,
-                    role: row.get(4)?,
+                    branch_id: row.get(2)?,
+                    username: row.get(3)?,
+                    full_name: row.get(4)?,
+                    role: row.get(5)?,
                 })
             },
         )
@@ -2353,6 +2408,137 @@ pub fn list_businesses(conn: &Connection) -> Result<Vec<Business>, DbError> {
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(businesses)
+}
+
+pub fn list_branches(
+    conn: &Connection,
+    business_id: &str,
+    actor: &AuthUser,
+) -> Result<Vec<Branch>, DbError> {
+    if actor.business_id != business_id {
+        return Err(DbError::InvalidInput("business scope mismatch".to_string()));
+    }
+    let mut stmt = conn.prepare(
+        "SELECT br.id, br.business_id, br.name, br.address, br.phone, br.is_active,
+                assignment.manager_id, u.full_name
+         FROM branches br
+         LEFT JOIN branch_manager_assignments assignment
+           ON assignment.business_id = br.business_id
+          AND assignment.branch_id = br.id
+          AND assignment.is_active = 1
+         LEFT JOIN users u ON u.business_id = br.business_id AND u.id = assignment.manager_id
+         WHERE br.business_id = ?1
+         ORDER BY br.is_active DESC, br.name COLLATE NOCASE",
+    )?;
+    let branches = stmt
+        .query_map(params![business_id], |row| {
+            Ok(Branch {
+                id: row.get(0)?,
+                business_id: row.get(1)?,
+                name: row.get(2)?,
+                address: row.get(3)?,
+                phone: row.get(4)?,
+                is_active: row.get::<_, i64>(5)? != 0,
+                manager_id: row.get(6)?,
+                manager_name: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(branches)
+}
+
+pub fn create_branch(
+    conn: &Connection,
+    business_id: &str,
+    actor: &AuthUser,
+    name: &str,
+    address: Option<&str>,
+    phone: Option<&str>,
+) -> Result<Branch, DbError> {
+    if actor.role != "owner" || actor.business_id != business_id {
+        return Err(DbError::InvalidInput("only the owner can create branches".to_string()));
+    }
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err(DbError::InvalidInput("branch name is required and must be 120 characters or fewer".to_string()));
+    }
+    let address = address.map(str::trim).filter(|value| !value.is_empty());
+    let phone = phone.map(str::trim).filter(|value| !value.is_empty());
+    let timestamp = now_utc();
+    let branch_id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO branches (id, business_id, name, address, phone, is_active, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)",
+        params![branch_id, business_id, name, address, phone, timestamp],
+    )?;
+    conn.execute(
+        "INSERT INTO audit_logs
+         (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'branch_created', 'branch', ?4, ?5, ?6)",
+        params![uuid::Uuid::new_v4().to_string(), business_id, actor.id,
+                branch_id, format!("name={name}"), timestamp],
+    )?;
+    list_branches(conn, business_id, actor)?
+        .into_iter()
+        .find(|branch| branch.id == branch_id)
+        .ok_or_else(|| DbError::InvalidInput("created branch could not be loaded".to_string()))
+}
+
+pub fn assign_branch_manager(
+    conn: &Connection,
+    business_id: &str,
+    branch_id: &str,
+    manager_id: &str,
+    actor: &AuthUser,
+) -> Result<Branch, DbError> {
+    if actor.role != "owner" || actor.business_id != business_id {
+        return Err(DbError::InvalidInput("only the owner can assign managers".to_string()));
+    }
+    let tx = conn.unchecked_transaction()?;
+    let valid: bool = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM users u JOIN user_roles ur ON ur.user_id = u.id
+            JOIN roles r ON r.id = ur.role_id AND r.business_id = u.business_id
+            WHERE u.id = ?1 AND u.business_id = ?2 AND u.is_active = 1 AND r.name = 'manager'
+        ) AND EXISTS(
+            SELECT 1 FROM branches WHERE id = ?3 AND business_id = ?2 AND is_active = 1
+        )",
+        params![manager_id, business_id, branch_id],
+        |row| row.get(0),
+    )?;
+    if !valid {
+        return Err(DbError::InvalidInput("manager or branch is invalid or inactive".to_string()));
+    }
+    let timestamp = now_utc();
+    tx.execute(
+        "UPDATE branch_manager_assignments
+         SET is_active = 0
+         WHERE business_id = ?1 AND branch_id = ?2 AND is_active = 1",
+        params![business_id, branch_id],
+    )?;
+    tx.execute(
+        "INSERT INTO branch_manager_assignments
+         (business_id, branch_id, manager_id, assigned_at, assigned_by, is_active)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+        params![business_id, branch_id, manager_id, timestamp, actor.id],
+    )?;
+    tx.execute(
+        "UPDATE users SET branch_id = ?1, updated_at = ?2
+         WHERE id = ?3 AND business_id = ?4",
+        params![branch_id, timestamp, manager_id, business_id],
+    )?;
+    tx.execute(
+        "INSERT INTO audit_logs
+         (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
+         VALUES (?1, ?2, ?3, 'branch_manager_assigned', 'branch', ?4, ?5, ?6)",
+        params![uuid::Uuid::new_v4().to_string(), business_id, actor.id,
+                branch_id, format!("manager_id={manager_id}"), timestamp],
+    )?;
+    tx.commit()?;
+    list_branches(conn, business_id, actor)?
+        .into_iter()
+        .find(|branch| branch.id == branch_id)
+        .ok_or_else(|| DbError::InvalidInput("assigned branch could not be loaded".to_string()))
 }
 
 #[cfg(test)]
@@ -8070,6 +8256,7 @@ mod tests {
         let manager = AuthUser {
             id: employee.id,
             business_id: employee.business_id,
+            branch_id: None,
             username: employee.username,
             full_name: employee.full_name,
             role: employee.role,
@@ -8416,6 +8603,7 @@ mod tests {
         let manager = AuthUser {
             id: employee.id,
             business_id: employee.business_id,
+            branch_id: None,
             username: employee.username,
             full_name: employee.full_name,
             role: employee.role,
@@ -8466,6 +8654,7 @@ mod tests {
                 &AuthUser {
                     id: second_manager.id,
                     business_id: second_manager.business_id,
+                    branch_id: None,
                     username: second_manager.username,
                     full_name: second_manager.full_name,
                     role: second_manager.role,
@@ -8636,6 +8825,7 @@ mod tests {
         let manager = AuthUser {
             id: employee.id,
             business_id: employee.business_id,
+            branch_id: None,
             username: employee.username,
             full_name: employee.full_name,
             role: employee.role,
@@ -8820,6 +9010,7 @@ mod tests {
         let manager = AuthUser {
             id: manager.id,
             business_id: manager.business_id,
+            branch_id: None,
             username: manager.username,
             full_name: manager.full_name,
             role: manager.role,
@@ -10167,6 +10358,7 @@ mod tests {
         let manager = AuthUser {
             id: employee.id,
             business_id: employee.business_id,
+            branch_id: None,
             username: employee.username,
             full_name: employee.full_name,
             role: employee.role,

@@ -441,6 +441,54 @@ fn business_create(
 }
 
 #[tauri::command]
+fn branch_list(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+) -> Result<Vec<db::Branch>, String> {
+    state
+        .with_business_permission(&business_id, db::PERMISSION_BUSINESS_READ, |conn, actor| {
+            db::list_branches(conn, &business_id, actor)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn branch_create(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    name: String,
+    address: Option<String>,
+    phone: Option<String>,
+) -> Result<db::Branch, String> {
+    state
+        .with_business_permission(&business_id, db::PERMISSION_BUSINESS_MANAGE, |conn, actor| {
+            db::create_branch(
+                conn,
+                &business_id,
+                actor,
+                &name,
+                address.as_deref(),
+                phone.as_deref(),
+            )
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn branch_manager_assign(
+    state: tauri::State<db::DbState>,
+    business_id: String,
+    branch_id: String,
+    manager_id: String,
+) -> Result<db::Branch, String> {
+    state
+        .with_business_permission(&business_id, db::PERMISSION_EMPLOYEES_MANAGE, |conn, actor| {
+            db::assign_branch_manager(conn, &business_id, &branch_id, &manager_id, actor)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn cash_account_list(
     state: tauri::State<db::DbState>,
     business_id: String,
@@ -1376,6 +1424,9 @@ pub fn run() {
             db_info,
             business_list,
             business_create,
+            branch_list,
+            branch_create,
+            branch_manager_assign,
             cash_account_list,
             cash_account_create,
             cash_account_payment_options,

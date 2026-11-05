@@ -27,6 +27,7 @@ interface RecoveryPrompts {
 interface AuthUser {
   id: string;
   business_id: string;
+  branch_id: string | null;
   username: string;
   full_name: string;
   role: string;

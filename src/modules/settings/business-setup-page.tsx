@@ -23,6 +23,29 @@ interface Business {
   language: string;
 }
 
+interface Branch {
+  id: string;
+  business_id: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  is_active: boolean;
+  manager_id: string | null;
+  manager_name: string | null;
+}
+
+interface Employee {
+  id: string;
+  business_id: string;
+  branch_id: string | null;
+  username: string;
+  full_name: string;
+  role: string;
+  is_active: boolean;
+  last_login_at: string | null;
+  created_at: string;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -30,8 +53,13 @@ function errorMessage(error: unknown): string {
 export function BusinessSetupPage() {
   const { user } = useAuthentication();
   const [businesses, setBusinesses] = useState<Business[]>([]);
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
   const [name, setName] = useState("");
   const [taxId, setTaxId] = useState("");
+  const [branchName, setBranchName] = useState("");
+  const [branchAddress, setBranchAddress] = useState("");
+  const [branchPhone, setBranchPhone] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,10 +86,27 @@ export function BusinessSetupPage() {
         }
       });
 
+    if (user.role === "owner") {
+      invoke<Branch[]>("branch_list", { businessId: user.business_id })
+        .then((result) => {
+          if (active) setBranches(result);
+        })
+        .catch((cause: unknown) => {
+          if (active) setError(`Could not load branches. ${errorMessage(cause)}`);
+        });
+      invoke<Employee[]>("employee_list", { businessId: user.business_id })
+        .then((result) => {
+          if (active) setEmployees(result.filter((employee) => employee.role === "manager"));
+        })
+        .catch((cause: unknown) => {
+          if (active) setError(`Could not load managers. ${errorMessage(cause)}`);
+        });
+    }
+
     return () => {
       active = false;
     };
-  }, []);
+  }, [user.business_id, user.role]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -83,6 +128,47 @@ export function BusinessSetupPage() {
       setIsSaving(false);
     }
 
+  }
+
+  async function handleBranchSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    setNotice(null);
+    setIsSaving(true);
+    try {
+      const created = await invoke<Branch>("branch_create", {
+        businessId: user.business_id,
+        name: branchName.trim(),
+        address: branchAddress.trim() || null,
+        phone: branchPhone.trim() || null,
+      });
+      setBranches((current) => [...current, created].sort((a, b) => a.name.localeCompare(b.name)));
+      setBranchName("");
+      setBranchAddress("");
+      setBranchPhone("");
+      setNotice("Branch created and audited.");
+    } catch (cause) {
+      setError(`Could not create branch. ${errorMessage(cause)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleManagerAssignment(branch: Branch, managerId: string) {
+    if (!managerId) return;
+    setError(null);
+    setNotice(null);
+    try {
+      const updated = await invoke<Branch>("branch_manager_assign", {
+        businessId: user.business_id,
+        branchId: branch.id,
+        managerId,
+      });
+      setBranches((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setNotice("Branch manager assigned and audited.");
+    } catch (cause) {
+      setError(`Could not assign manager. ${errorMessage(cause)}`);
+    }
   }
 
   async function handleBackup() {
@@ -141,6 +227,61 @@ export function BusinessSetupPage() {
         <div role="status" className="rounded-lg border border-primary/20 bg-primary/5 p-4 text-sm text-foreground">
           {notice}
         </div>
+      ) : null}
+
+      {user.role === "owner" ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Branches</CardTitle>
+            <CardDescription>Create branch locations and view their assigned managers.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <form className="grid gap-4 md:grid-cols-3" onSubmit={handleBranchSubmit}>
+              <div className="space-y-2">
+                <Label htmlFor="branch-name">Branch name</Label>
+                <Input id="branch-name" required maxLength={120} value={branchName} onChange={(event) => setBranchName(event.target.value)} placeholder="e.g. Goma branch" />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="branch-address">Address</Label>
+                <Input id="branch-address" maxLength={200} value={branchAddress} onChange={(event) => setBranchAddress(event.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="branch-phone">Phone</Label>
+                <Input id="branch-phone" maxLength={80} value={branchPhone} onChange={(event) => setBranchPhone(event.target.value)} />
+              </div>
+              <div className="md:col-span-3 flex justify-end">
+                <Button type="submit" disabled={isSaving || !branchName.trim()}>
+                  {isSaving ? <LoaderCircle className="animate-spin" /> : null}
+                  Create branch
+                </Button>
+              </div>
+            </form>
+            <div className="divide-y rounded-lg border">
+              {branches.map((branch) => (
+                <div key={branch.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+                  <div>
+                    <p className="font-medium">{branch.name}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {branch.address || "No address"} · {branch.phone || "No phone"}
+                    </p>
+                  </div>
+                  <select
+                    className="rounded-md border bg-background px-3 py-2 text-sm"
+                    value={branch.manager_id || ""}
+                    onChange={(event) => void handleManagerAssignment(branch, event.target.value)}
+                    aria-label={`Manager for ${branch.name}`}
+                  >
+                    <option value="">No manager assigned</option>
+                    {employees.map((employee) => (
+                      <option key={employee.id} value={employee.id}>{employee.full_name}</option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+              {branches.length === 0 ? <p className="px-4 py-3 text-sm text-muted-foreground">No branches registered.</p> : null}
+            </div>
+          </CardContent>
+        </Card>
       ) : null}
 
       {user.role === "owner" ? (
