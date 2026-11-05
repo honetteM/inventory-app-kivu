@@ -15,12 +15,24 @@ type EmployeeRole = "manager" | "cashier";
 interface Employee {
   id: string;
   business_id: string;
+  branch_id: string | null;
   username: string;
   full_name: string;
   role: EmployeeRole;
   is_active: boolean;
   last_login_at: string | null;
   created_at: string;
+}
+
+interface Branch {
+  id: string;
+  business_id: string;
+  name: string;
+  address: string | null;
+  phone: string | null;
+  is_active: boolean;
+  manager_id: string | null;
+  manager_name: string | null;
 }
 
 interface RolePermissionSetting {
@@ -62,6 +74,8 @@ function roleLabel(role: EmployeeRole): string {
 export function EmployeesPage() {
   const { user } = useAuthentication();
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [selectedBranchId, setSelectedBranchId] = useState("");
   const [managerPermissions, setManagerPermissions] = useState<RolePermissionSetting[]>([]);
   const [username, setUsername] = useState("");
   const [fullName, setFullName] = useState("");
@@ -83,11 +97,15 @@ export function EmployeesPage() {
     Promise.all([
       invoke<Employee[]>("employee_list", { businessId: user.business_id }),
       invoke<RolePermissionSetting[]>("manager_permission_list", { businessId: user.business_id }),
+      invoke<Branch[]>("branch_list", { businessId: user.business_id }),
     ])
-      .then(([employeeResult, permissionResult]) => {
+      .then(([employeeResult, permissionResult, branchResult]) => {
         if (active) {
           setEmployees(employeeResult);
           setManagerPermissions(permissionResult);
+          const activeBranches = branchResult.filter((branch) => branch.is_active);
+          setBranches(activeBranches);
+          setSelectedBranchId((current) => current || activeBranches[0]?.id || "");
           setError(null);
         }
       })
@@ -111,6 +129,10 @@ export function EmployeesPage() {
     event.preventDefault();
     setError(null);
     setNotice(null);
+    if (!selectedBranchId) {
+      setError("Select a branch for the Manager profile.");
+      return;
+    }
     if (password !== passwordConfirmation) {
       setError("Password confirmation does not match.");
       return;
@@ -120,6 +142,7 @@ export function EmployeesPage() {
     try {
       const createdEmployee = await invoke<Employee>("employee_create", {
         businessId: user.business_id,
+        branchId: selectedBranchId,
         username: username.trim(),
         fullName: fullName.trim(),
         role: "manager",
@@ -331,6 +354,28 @@ export function EmployeesPage() {
               />
             </div>
             <div className="space-y-2">
+              <Label htmlFor="employee-branch">Assigned branch</Label>
+              <select
+                id="employee-branch"
+                required
+                value={selectedBranchId}
+                disabled={isSaving || branches.length === 0}
+                onChange={(event) => setSelectedBranchId(event.target.value)}
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {branches.length === 0 ? (
+                  <option value="">No active branches available</option>
+                ) : (
+                  branches.map((branch) => (
+                    <option key={branch.id} value={branch.id}>
+                      {branch.name}
+                    </option>
+                  ))
+                )}
+              </select>
+              <p className="text-xs text-muted-foreground">The Manager will be restricted to this branch.</p>
+            </div>
+            <div className="space-y-2">
               <Label htmlFor="employee-username">Username</Label>
               <Input
                 id="employee-username"
@@ -409,6 +454,9 @@ export function EmployeesPage() {
                         <p className="truncate font-medium">{employee.full_name}</p>
                         <p className="text-sm text-muted-foreground">
                           @{employee.username} · {roleLabel(employee.role)}
+                          {employee.branch_id
+                            ? ` · ${branches.find((branch) => branch.id === employee.branch_id)?.name ?? "Assigned branch"}`
+                            : ""}
                         </p>
                       </div>
                       <Badge variant={employee.is_active ? "default" : "secondary"}>

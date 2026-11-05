@@ -296,6 +296,7 @@ fn employee_list(
 fn employee_create(
     state: tauri::State<db::DbState>,
     business_id: String,
+    branch_id: String,
     username: String,
     full_name: String,
     role: String,
@@ -310,9 +311,10 @@ fn employee_create(
             &business_id,
             db::PERMISSION_EMPLOYEES_MANAGE,
             |conn, actor| {
-                db::create_employee(
+                db::create_employee_for_branch(
                     conn,
                     &business_id,
+                    &branch_id,
                     actor,
                     &username,
                     &full_name,

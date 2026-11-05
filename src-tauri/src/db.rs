@@ -1479,6 +1479,36 @@ pub fn create_employee(
     role: &str,
     password_hash: &str,
 ) -> Result<Employee, DbError> {
+    let branch_id: String = conn.query_row(
+        "SELECT id FROM branches
+         WHERE business_id = ?1 AND is_active = 1
+         ORDER BY CASE WHEN name = 'Main branch' THEN 0 ELSE 1 END, name COLLATE NOCASE
+         LIMIT 1",
+        params![business_id],
+        |row| row.get(0),
+    )?;
+    create_employee_for_branch(
+        conn,
+        business_id,
+        &branch_id,
+        actor,
+        username,
+        full_name,
+        role,
+        password_hash,
+    )
+}
+
+pub fn create_employee_for_branch(
+    conn: &Connection,
+    business_id: &str,
+    branch_id: &str,
+    actor: &AuthUser,
+    username: &str,
+    full_name: &str,
+    role: &str,
+    password_hash: &str,
+) -> Result<Employee, DbError> {
     if actor.role != "owner" || actor.business_id != business_id {
         return Err(DbError::InvalidInput(
             "an owner signed in to this business is required".to_string(),
@@ -1497,6 +1527,19 @@ pub fn create_employee(
     }
     let (username, full_name) = validate_auth_identity(username, full_name)?;
     let tx = conn.unchecked_transaction()?;
+    let branch_valid: bool = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM branches
+            WHERE id = ?1 AND business_id = ?2 AND is_active = 1
+         )",
+        params![branch_id, business_id],
+        |row| row.get(0),
+    )?;
+    if !branch_valid {
+        return Err(DbError::InvalidInput(
+            "selected branch is invalid or inactive".to_string(),
+        ));
+    }
     let timestamp = now_utc();
     let (role_id, manager_role_created) = ensure_manager_role(&tx, business_id, &timestamp)?;
     if manager_role_created {
@@ -1505,11 +1548,12 @@ pub fn create_employee(
     let user_id = uuid::Uuid::new_v4().to_string();
     tx.execute(
         "INSERT INTO users
-            (id, business_id, username, full_name, password_hash, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            (id, business_id, branch_id, username, full_name, password_hash, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
         params![
             user_id,
             business_id,
+            branch_id,
             username,
             full_name,
             password_hash,
@@ -1526,6 +1570,28 @@ pub fn create_employee(
             timestamp
         ],
     )?;
+    let assignment_table_exists: bool = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'branch_manager_assignments'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if assignment_table_exists {
+        tx.execute(
+            "UPDATE branch_manager_assignments
+             SET is_active = 0
+             WHERE business_id = ?1 AND branch_id = ?2 AND is_active = 1",
+            params![business_id, branch_id],
+        )?;
+        tx.execute(
+            "INSERT INTO branch_manager_assignments
+             (business_id, branch_id, manager_id, assigned_at, assigned_by, is_active)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            params![business_id, branch_id, user_id, timestamp, actor.id],
+        )?;
+    }
     tx.execute(
         "INSERT INTO audit_logs
             (id, business_id, user_id, action, entity_type, entity_id, details, created_at)
@@ -1535,7 +1601,7 @@ pub fn create_employee(
             business_id,
             actor.id,
             user_id,
-            format!("role={role}"),
+            format!("role={role};branch_id={branch_id}"),
             timestamp
         ],
     )?;
