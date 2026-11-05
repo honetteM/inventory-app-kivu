@@ -3476,6 +3476,33 @@ pub struct DailyCashOutflowBreakdown {
 }
 
 #[derive(Debug, serde::Serialize)]
+pub struct BalanceSheetAccount {
+    pub account_type: String,
+    pub name: String,
+    pub balance: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct BalanceSheetReport {
+    pub business_name: String,
+    pub report_date: String,
+    pub cash_accounts: Vec<BalanceSheetAccount>,
+    pub cash_and_bank: i64,
+    pub inventory: i64,
+    pub accounts_receivable: i64,
+    pub total_assets: i64,
+    pub accounts_payable: i64,
+    pub loan_payable: i64,
+    pub total_liabilities: i64,
+    pub retained_earnings: i64,
+    pub owner_equity: i64,
+    pub total_equity: i64,
+    pub total_liabilities_and_equity: i64,
+    pub balance_difference: i64,
+    pub is_balanced: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub struct DailyBusinessReport {
     pub business_name: String,
     pub report_date: String,
@@ -3561,7 +3588,11 @@ pub fn daily_business_report(
     let opening_physical_cash: i64 = conn.query_row(
         "SELECT COALESCE(SUM(
             o.opening_amount + COALESCE((
-            SELECT SUM(CASE WHEN m.direction = 'in' THEN m.amount ELSE -m.amount END)
+            SELECT SUM(CASE
+                WHEN m.movement_type = 'loan_issued' THEN m.amount
+                WHEN m.movement_type = 'loan_repayment' THEN -m.amount
+                WHEN m.direction = 'in' THEN m.amount ELSE -m.amount
+            END)
             FROM cash_movements m
             WHERE m.business_id = o.business_id AND m.account_id = o.account_id
               AND m.recorded_at >= o.recorded_at
@@ -3806,13 +3837,11 @@ pub fn daily_business_report(
             |row| row.get(0),
         )?)
     };
-    let cash_customer_repayment =
-        account_movement_sum("customer_repayment", "'cash_drawer'")?;
+    let cash_customer_repayment = account_movement_sum("customer_repayment", "'cash_drawer'")?;
     let cash_loan_received = account_movement_sum("loan_issued", "'cash_drawer'")?;
     let cash_loan_paid = account_movement_sum("loan_repayment", "'cash_drawer'")?;
     let bank_loan_paid = account_movement_sum("loan_repayment", "'bank'")?;
-    let momo_loan_paid =
-        account_movement_sum("loan_repayment", "'mtn_wallet', 'airtel_wallet'")?;
+    let momo_loan_paid = account_movement_sum("loan_repayment", "'mtn_wallet', 'airtel_wallet'")?;
     let cash_supplier_payments = account_movement_sum("supplier_payment", "'cash_drawer'")?;
     let bank_supplier_payments = account_movement_sum("supplier_payment", "'bank'")?;
     let momo_supplier_payments =
@@ -4010,6 +4039,211 @@ pub fn daily_business_report(
         customer_outstanding,
         supplier_outstanding,
         stock_adjustment_counts,
+    })
+}
+
+pub fn balance_sheet_report(
+    conn: &Connection,
+    business_id: &str,
+    report_date: &str,
+) -> Result<BalanceSheetReport, DbError> {
+    validate_expense_date(report_date)?;
+    let business_name: String = conn
+        .query_row(
+            "SELECT name FROM businesses WHERE id = ?1",
+            params![business_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| DbError::InvalidInput("business does not exist".to_string()))?;
+
+    let mut account_stmt = conn.prepare(
+        "SELECT a.account_type, a.name,
+                COALESCE(o.opening_amount, 0) + COALESCE((
+                    SELECT SUM(CASE WHEN m.direction = 'in' THEN m.amount ELSE -m.amount END)
+                    FROM cash_movements m
+                    WHERE m.business_id = a.business_id AND m.account_id = a.id
+                      AND m.recorded_at >= o.recorded_at
+                      AND date(m.occurred_at, 'localtime') <= ?2
+                ), 0)
+         FROM cash_accounts a
+         LEFT JOIN cash_account_openings o
+           ON o.business_id = a.business_id AND o.account_id = a.id
+         WHERE a.business_id = ?1
+         ORDER BY a.account_type, a.name COLLATE NOCASE",
+    )?;
+    let cash_accounts = account_stmt
+        .query_map(params![business_id, report_date], |row| {
+            Ok(BalanceSheetAccount {
+                account_type: row.get(0)?,
+                name: row.get(1)?,
+                balance: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let cash_and_bank = cash_accounts.iter().try_fold(0_i64, |total, account| {
+        total.checked_add(account.balance).ok_or_else(|| {
+            DbError::InvalidInput("cash account balance exceeds the supported range".to_string())
+        })
+    })?;
+
+    let mut inventory_stmt = conn.prepare(
+        "SELECT COALESCE(ib.quantity_on_hand, 0)
+               - COALESCE((
+                   SELECT SUM(sm.quantity_delta)
+                   FROM stock_movements sm
+                   WHERE sm.business_id = ib.business_id AND sm.product_id = ib.product_id
+                     AND date(sm.created_at, 'localtime') > ?2
+               ), 0),
+               ib.average_unit_cost
+         FROM inventory_balances ib
+         WHERE ib.business_id = ?1",
+    )?;
+    let inventory_rows = inventory_stmt
+        .query_map(params![business_id, report_date], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let inventory =
+        inventory_rows
+            .into_iter()
+            .try_fold(0_i64, |total, (quantity, unit_cost)| {
+                if quantity < 0 {
+                    return Err(DbError::InvalidInput(
+                        "historical inventory quantity is negative".to_string(),
+                    ));
+                }
+                let value = stock_value(quantity, unit_cost)?;
+                total.checked_add(value).ok_or_else(|| {
+                    DbError::InvalidInput("inventory value exceeds the supported range".to_string())
+                })
+            })?;
+
+    let accounts_receivable: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(
+            d.original_amount
+            - COALESCE((
+                SELECT SUM(sp.amount) FROM sale_payments sp
+                WHERE sp.sale_id = d.sale_id
+                  AND date(sp.created_at, 'localtime') <= ?2
+            ), 0)
+            - COALESCE((
+                SELECT SUM(dp.amount) FROM customer_debt_payments dp
+                WHERE dp.business_id = d.business_id AND dp.debt_id = d.id
+                  AND date(dp.created_at, 'localtime') <= ?2
+            ), 0)
+        ), 0)
+         FROM customer_debts d
+         JOIN sales s ON s.id = d.sale_id AND s.business_id = d.business_id
+         WHERE d.business_id = ?1 AND s.status = 'completed'
+           AND date(s.created_at, 'localtime') <= ?2",
+        params![business_id, report_date],
+        |row| row.get(0),
+    )?;
+
+    let accounts_payable: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(
+            p.subtotal - COALESCE((
+                SELECT SUM(pp.amount) FROM purchase_payments pp
+                WHERE pp.business_id = p.business_id AND pp.purchase_id = p.id
+                  AND date(pp.created_at, 'localtime') <= ?2
+            ), 0)
+        ), 0)
+         FROM purchases p
+         WHERE p.business_id = ?1 AND date(p.created_at, 'localtime') <= ?2",
+        params![business_id, report_date],
+        |row| row.get(0),
+    )?;
+    let loan_payable_net: i64 = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(CASE
+            WHEN movement_type = 'loan_issued' THEN amount
+            WHEN movement_type = 'loan_repayment' THEN -amount
+            ELSE 0
+         END), 0)
+         FROM cash_movements
+         WHERE business_id = ?1 AND movement_type IN ('loan_issued', 'loan_repayment')
+           AND date(occurred_at, 'localtime') <= ?2",
+        business_id,
+        report_date,
+    )?;
+    let loan_payable = loan_payable_net.max(0);
+    let total_assets = cash_and_bank
+        .checked_add(inventory)
+        .and_then(|value| value.checked_add(accounts_receivable))
+        .ok_or_else(|| {
+            DbError::InvalidInput("total assets exceed the supported range".to_string())
+        })?;
+    let total_liabilities = accounts_payable.checked_add(loan_payable).ok_or_else(|| {
+        DbError::InvalidInput("total liabilities exceed the supported range".to_string())
+    })?;
+
+    let sales_total = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(total), 0) FROM sales
+         WHERE business_id = ?1 AND status = 'completed'
+           AND date(created_at, 'localtime') <= ?2",
+        business_id,
+        report_date,
+    )?;
+    let cost_of_goods_sold = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(si.total_cost), 0) FROM sale_items si
+         JOIN sales s ON s.id = si.sale_id AND s.business_id = si.business_id
+         WHERE s.business_id = ?1 AND s.status = 'completed'
+           AND date(s.created_at, 'localtime') <= ?2",
+        business_id,
+        report_date,
+    )?;
+    let expenses_total = report_amount(
+        conn,
+        "SELECT COALESCE(SUM(amount), 0) FROM expenses
+         WHERE business_id = ?1 AND expense_date <= ?2",
+        business_id,
+        report_date,
+    )?;
+    let retained_earnings = sales_total
+        .checked_sub(cost_of_goods_sold)
+        .and_then(|value| value.checked_sub(expenses_total))
+        .ok_or_else(|| {
+            DbError::InvalidInput("retained earnings exceed the supported range".to_string())
+        })?;
+    let owner_equity = total_assets
+        .checked_sub(total_liabilities)
+        .and_then(|value| value.checked_sub(retained_earnings))
+        .ok_or_else(|| {
+            DbError::InvalidInput("owner equity exceeds the supported range".to_string())
+        })?;
+    let total_equity = retained_earnings.checked_add(owner_equity).ok_or_else(|| {
+        DbError::InvalidInput("total equity exceeds the supported range".to_string())
+    })?;
+    let total_liabilities_and_equity =
+        total_liabilities.checked_add(total_equity).ok_or_else(|| {
+            DbError::InvalidInput("liabilities and equity exceed the supported range".to_string())
+        })?;
+    let balance_difference = total_assets
+        .checked_sub(total_liabilities_and_equity)
+        .ok_or_else(|| {
+            DbError::InvalidInput("balance difference exceeds the supported range".to_string())
+        })?;
+
+    Ok(BalanceSheetReport {
+        business_name,
+        report_date: report_date.to_string(),
+        cash_accounts,
+        cash_and_bank,
+        inventory,
+        accounts_receivable,
+        total_assets,
+        accounts_payable,
+        loan_payable,
+        total_liabilities,
+        retained_earnings,
+        owner_equity,
+        total_equity,
+        total_liabilities_and_equity,
+        balance_difference,
+        is_balanced: balance_difference == 0,
     })
 }
 

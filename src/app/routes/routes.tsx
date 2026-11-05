@@ -17,6 +17,7 @@ import { CashAccountsPage } from "@/modules/cash-accounts/cash-accounts-page";
 import { EmployeesPage } from "@/modules/employees/employees-page";
 import { DailyReportPrintPage } from "@/modules/reports/daily-report-print-page";
 import { IncomeStatementPage } from "@/modules/reports/income-statement-page";
+import { BalanceSheetPage } from "@/modules/reports/balance-sheet-page";
 
 export const router = createBrowserRouter([
   { path: "/reports/daily/print", element: <DailyReportPrintPage /> },
@@ -38,6 +39,7 @@ export const router = createBrowserRouter([
       { path: "cash-accounts", element: <CashAccountsPage /> },
       { path: "reports", element: <ReportsPage /> },
       { path: "reports/income", element: <IncomeStatementPage /> },
+      { path: "reports/balance-sheet", element: <BalanceSheetPage /> },
       { path: "employees", element: <EmployeesPage /> },
       { path: "settings", element: <BusinessSetupPage /> },
     ],
