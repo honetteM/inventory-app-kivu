@@ -280,6 +280,7 @@ impl DbState {
     ) -> Result<T, DbError> {
         self.with_authenticated(|conn, user| {
             require_permission(conn, user, permission)?;
+            require_active_manager_branch(conn, user)?;
             f(conn, user)
         })
     }
@@ -331,6 +332,60 @@ fn require_permission(conn: &Connection, user: &AuthUser, permission: &str) -> R
             "your role does not have permission: {permission}"
         )))
     }
+}
+
+pub fn require_active_manager_branch(
+    conn: &Connection,
+    actor: &AuthUser,
+) -> Result<(), DbError> {
+        if actor.role == "owner" {
+            return Ok(());
+        }
+        if actor.role != "manager" {
+            return Err(DbError::InvalidInput(
+                "only owner and manager roles can use the application".to_string(),
+            ));
+        }
+        let Some(branch_id) = actor.branch_id.as_deref() else {
+            return Err(DbError::InvalidInput(
+                "manager account has no assigned branch".to_string(),
+            ));
+        };
+        let assigned: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM branch_manager_assignments assignment
+                JOIN branches branch ON branch.id = assignment.branch_id
+                    AND branch.business_id = assignment.business_id
+                WHERE assignment.business_id = ?1
+                  AND assignment.manager_id = ?2
+                  AND assignment.branch_id = ?3
+                  AND assignment.is_active = 1
+                  AND branch.is_active = 1
+            )",
+            params![actor.business_id, actor.id, branch_id],
+            |row| row.get(0),
+        )?;
+        if !assigned {
+            return Err(DbError::InvalidInput(
+                "manager branch assignment is inactive or missing".to_string(),
+            ));
+        }
+        Ok(())
+}
+
+pub fn require_branch_match(
+    actor: &AuthUser,
+    record_branch_id: Option<&str>,
+) -> Result<(), DbError> {
+        if actor.role == "owner" {
+            return Ok(());
+        }
+        if record_branch_id != actor.branch_id.as_deref() {
+            return Err(DbError::InvalidInput(
+                "record does not belong to the manager's assigned branch".to_string(),
+            ));
+        }
+        Ok(())
 }
 
 pub fn list_user_permissions(conn: &Connection, user: &AuthUser) -> Result<Vec<String>, DbError> {
@@ -2576,6 +2631,12 @@ pub fn assign_branch_manager(
         return Err(DbError::InvalidInput("manager or branch is invalid or inactive".to_string()));
     }
     let timestamp = now_utc();
+    tx.execute(
+        "UPDATE branch_manager_assignments
+         SET is_active = 0
+         WHERE business_id = ?1 AND manager_id = ?2 AND is_active = 1",
+        params![business_id, manager_id],
+    )?;
     tx.execute(
         "UPDATE branch_manager_assignments
          SET is_active = 0
@@ -8322,7 +8383,7 @@ mod tests {
         let manager = AuthUser {
             id: employee.id,
             business_id: employee.business_id,
-            branch_id: None,
+            branch_id: employee.branch_id,
             username: employee.username,
             full_name: employee.full_name,
             role: employee.role,
@@ -8542,6 +8603,12 @@ mod tests {
         assert_eq!(manager_credentials.user.role, "manager");
         assert_eq!(manager_credentials.password_hash, "$argon2id$employee-hash");
         assert!(DbState::is_active_session(&conn, &manager_credentials.user).unwrap());
+        assert!(manager_credentials.user.branch_id.is_some());
+        require_active_manager_branch(&conn, &manager_credentials.user).unwrap();
+        assert!(matches!(
+            require_branch_match(&manager_credentials.user, Some("other-branch-id")),
+            Err(DbError::InvalidInput(_))
+        ));
         let manager_permissions = list_user_permissions(&conn, &manager_credentials.user).unwrap();
         assert!(manager_permissions.contains(&PERMISSION_CATALOG_MANAGE.to_string()));
         assert!(!manager_permissions.contains(&PERMISSION_REPORTS_READ.to_string()));
@@ -8669,7 +8736,7 @@ mod tests {
         let manager = AuthUser {
             id: employee.id,
             business_id: employee.business_id,
-            branch_id: None,
+            branch_id: employee.branch_id.clone(),
             username: employee.username,
             full_name: employee.full_name,
             role: employee.role,
@@ -8891,7 +8958,7 @@ mod tests {
         let manager = AuthUser {
             id: employee.id,
             business_id: employee.business_id,
-            branch_id: None,
+            branch_id: employee.branch_id.clone(),
             username: employee.username,
             full_name: employee.full_name,
             role: employee.role,
